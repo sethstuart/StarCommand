@@ -1,0 +1,2 @@
+telescope_control_v2
+telescope_gui_v2

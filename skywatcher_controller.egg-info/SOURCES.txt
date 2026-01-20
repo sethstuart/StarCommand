@@ -1,0 +1,8 @@
+setup.py
+telescope_control_v2.py
+telescope_gui_v2.py
+skywatcher_controller.egg-info/PKG-INFO
+skywatcher_controller.egg-info/SOURCES.txt
+skywatcher_controller.egg-info/dependency_links.txt
+skywatcher_controller.egg-info/entry_points.txt
+skywatcher_controller.egg-info/top_level.txt

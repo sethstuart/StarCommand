@@ -1,0 +1,9 @@
+# SkyWatcher Telescope Controller Requirements
+# Python 3.7+
+
+# No external dependencies for CLI version!
+# GUI version only requires tkinter (usually pre-installed)
+
+# For development/testing (optional):
+# pytest>=7.0.0
+# pytest-cov>=3.0.0
