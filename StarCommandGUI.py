@@ -3,35 +3,32 @@
 Sky-Watcher Virtuoso GTi 150P Professional Controller
 Full-featured GUI with configurable settings, themes, and keyboard controls
 
-Version: 0.3.1 - Diagnostic Edition for Azimuth Motor Troubleshooting
+Version: 0.4.0
 
-CHANGELOG v0.3.1:
-  - Added file logging with timestamped filenames (in parent directory)
-  - Added debug mode checkbox in Settings -> Logging tab
-  - Added continuous status monitoring (200ms polling) during motion
-  - Added real-time axis status indicators (Moving/Stopped/Blocked)
-  - Added Status byte decoder for human-readable diagnostics
-  - Fixed status bit definitions for proper blocked detection
+CHANGELOG v0.4.0:
+  - Added SQLite database for persistent settings (replaces JSON config)
+  - Fixed KeyError for 'tracking_mode' in status display
+  - Fixed position display not updating on Control tab
+  - Added momentary vs latching control mode toggle
+  - Fixed altitude info not appearing in mount info/status
+  - Condensed Status and Mount Info into single "Diagnostics" tab
+  - Made status text fields read-only
+  - Added theme preview with color swatches
+  - Theme changes now apply without restart
+  - File logging with debug mode support
 
-PREVIOUS FIXES (v0.3.0):
-  - Removed X10 prefix (GTi doesn't support it)
-  - Fixed :G command format (was :G{axis}{mode}{dir}, now :G{axis}{2-digit-code})
-  - Added :F1 and :F2 initialization (CRITICAL - mount won't move without this!)
+PREVIOUS FIXES:
+  - v0.3.1: Status monitoring, file logging, blocked detection
+  - v0.3.0: Fixed protocol commands for GTi 150P
 
 Works with GTi 150P firmware that uses simple protocol without X10 prefix.
-
-DIAGNOSTIC FOCUS: Watching for Blocked bit (0x02) when azimuth motor stops
-  - If Blocked bit gets set: Motor controller detected obstruction
-  - If motion stops WITHOUT Blocked bit: PTC fuse likely tripped first
 """
-
-VERSION = "0.3.1"
 
 import socket
 import time
 import sys
 import threading
-import json
+import sqlite3
 import os
 from datetime import datetime
 from pathlib import Path
@@ -43,11 +40,144 @@ except ImportError:
     print("Error: tkinter not available. Install with: sudo apt-get install python3-tk")
     sys.exit(1)
 
+VERSION = "0.4.0"
 
 # Status byte bit definitions (from SynScan protocol)
 STATUS_RUNNING = 0x01      # Bit 0: Motor is running
 STATUS_BLOCKED = 0x02      # Bit 1: Motor blocked/stalled  
 STATUS_INIT = 0x04         # Bit 2: Axis initialized
+
+
+class DatabaseConfig:
+    """SQLite-based configuration manager for persistent settings."""
+    
+    DEFAULT_SETTINGS = {
+        # Connection
+        'connection.ip': '192.168.4.1',
+        'connection.port': '11880',
+        'connection.timeout': '2.0',
+        # Controls
+        'controls.up': 'w',
+        'controls.down': 's',
+        'controls.left': 'a',
+        'controls.right': 'd',
+        'controls.stop': 'space',
+        'controls.estop': 'Escape',
+        'controls.speed_up': 'plus',
+        'controls.speed_down': 'minus',
+        'controls.mode': 'latching',  # 'latching' or 'momentary'
+        # Display
+        'display.position_format': 'both',
+        'display.show_positions': 'True',
+        'display.auto_update': 'False',
+        'display.update_rate': '1.0',
+        # Positions
+        'positions.home_az': '0.0',
+        'positions.home_alt': '0.0',
+        'positions.stow_az': '0.0',
+        'positions.stow_alt': '90.0',
+        # Theme
+        'theme.bg': '#2b2b2b',
+        'theme.fg': '#ffffff',
+        'theme.button_bg': '#3c3c3c',
+        'theme.button_fg': '#ffffff',
+        'theme.accent': '#4a9eff',
+        'theme.estop': '#ff4444',
+        # Speed
+        'speed.default': '1.0',
+        'speed.min': '0.1',
+        'speed.max': '10.0',
+        # Logging
+        'logging.debug_mode': 'False',
+    }
+    
+    def __init__(self, db_path: Path = None):
+        if db_path is None:
+            # Store in user's home directory
+            config_dir = Path.home() / '.skywatcher_controller'
+            config_dir.mkdir(exist_ok=True)
+            db_path = config_dir / 'settings.db'
+        
+        self.db_path = db_path
+        self._init_database()
+    
+    def _init_database(self):
+        """Initialize the database with tables."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Settings table (key-value store)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+        
+        # Insert defaults for any missing keys
+        for key, value in self.DEFAULT_SETTINGS.items():
+            cursor.execute('''
+                INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)
+            ''', (key, value))
+        
+        conn.commit()
+        conn.close()
+    
+    def get(self, key: str, default=None):
+        """Get a setting value."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return row[0]
+        return default if default is not None else self.DEFAULT_SETTINGS.get(key)
+    
+    def get_int(self, key: str, default: int = 0) -> int:
+        """Get a setting as integer."""
+        value = self.get(key)
+        try:
+            return int(value) if value else default
+        except ValueError:
+            return default
+    
+    def get_float(self, key: str, default: float = 0.0) -> float:
+        """Get a setting as float."""
+        value = self.get(key)
+        try:
+            return float(value) if value else default
+        except ValueError:
+            return default
+    
+    def get_bool(self, key: str, default: bool = False) -> bool:
+        """Get a setting as boolean."""
+        value = self.get(key)
+        if value is None:
+            return default
+        return value.lower() in ('true', '1', 'yes')
+    
+    def set(self, key: str, value):
+        """Set a setting value."""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)
+        ''', (key, str(value)))
+        conn.commit()
+        conn.close()
+    
+    def get_all_theme(self) -> dict:
+        """Get all theme settings as a dict."""
+        return {
+            'bg': self.get('theme.bg'),
+            'fg': self.get('theme.fg'),
+            'button_bg': self.get('theme.button_bg'),
+            'button_fg': self.get('theme.button_fg'),
+            'accent': self.get('theme.accent'),
+            'estop': self.get('theme.estop'),
+        }
 
 
 class FileLogger:
@@ -89,16 +219,7 @@ class FileLogger:
         self.log(f"Debug mode {'enabled' if enabled else 'disabled'}", level='INFO')
     
     def log(self, message: str, level: str = 'INFO'):
-        """
-        Log a message to file.
-        
-        Levels:
-        - DEBUG: Only logged if debug mode is on
-        - INFO: Always logged
-        - WARNING: Always logged
-        - ERROR: Always logged
-        - STATUS: State changes, always logged
-        """
+        """Log a message to file."""
         if level == 'DEBUG' and not self.debug_mode:
             return
         
@@ -223,91 +344,6 @@ class StatusMonitor:
             time.sleep(0.2)  # 200ms polling interval
 
 
-class Config:
-    """Configuration manager"""
-    
-    DEFAULT_CONFIG = {
-        'connection': {
-            'ip': '192.168.4.1',
-            'port': 11880,
-            'timeout': 2.0
-        },
-        'controls': {
-            'up': 'w',
-            'down': 's',
-            'left': 'a',
-            'right': 'd',
-            'stop': 'space',
-            'estop': 'Escape',
-            'speed_up': 'plus',
-            'speed_down': 'minus'
-        },
-        'display': {
-            'position_format': 'both',  # 'degrees', 'raw', 'both', 'coordinates'
-            'show_positions': True,
-            'auto_update': False,
-            'update_rate': 1.0
-        },
-        'positions': {
-            'home_az': 0,
-            'home_alt': 0,
-            'stow_az': 0,
-            'stow_alt': 90
-        },
-        'theme': {
-            'bg': '#2b2b2b',
-            'fg': '#ffffff',
-            'button_bg': '#3c3c3c',
-            'button_fg': '#ffffff',
-            'accent': '#4a9eff',
-            'estop': '#ff4444'
-        },
-        'speed': {
-            'default': 1.0,
-            'min': 0.1,
-            'max': 10.0
-        }
-    }
-    
-    def __init__(self):
-        self.config_dir = Path.home() / '.skywatcher_controller'
-        self.config_file = self.config_dir / 'config.json'
-        self.config = self.DEFAULT_CONFIG.copy()
-        self.load()
-    
-    def load(self):
-        """Load configuration from file"""
-        if self.config_file.exists():
-            try:
-                with open(self.config_file, 'r') as f:
-                    loaded = json.load(f)
-                    # Deep merge
-                    for section in loaded:
-                        if section in self.config:
-                            self.config[section].update(loaded[section])
-            except Exception as e:
-                print(f"Error loading config: {e}")
-    
-    def save(self):
-        """Save configuration to file"""
-        try:
-            self.config_dir.mkdir(exist_ok=True)
-            with open(self.config_file, 'w') as f:
-                json.dump(self.config, f, indent=2)
-        except Exception as e:
-            print(f"Error saving config: {e}")
-    
-    def get(self, section, key, default=None):
-        """Get config value"""
-        return self.config.get(section, {}).get(key, default)
-    
-    def set(self, section, key, value):
-        """Set config value"""
-        if section not in self.config:
-            self.config[section] = {}
-        self.config[section][key] = value
-
-
 class SkyWatcherProtocol:
     """Implementation of SkyWatcher Motor Controller Protocol"""
     
@@ -395,7 +431,7 @@ class SkyWatcherProtocol:
         return response and response.startswith('=')
     
     def set_motion_mode(self, axis, goto_mode=False, direction_cw=True, high_speed=False):
-        """Set motion mode - FIXED FORMAT"""
+        """Set motion mode - FIXED FORMAT for GTi 150P"""
         # Mode codes (2 hex digits):
         # 00 = High-speed GOTO, CW
         # 01 = High-speed GOTO, CCW  
@@ -505,7 +541,7 @@ class SkyWatcherProtocol:
             status = int(status_hex, 16)
             # Proper bit definitions per SynScan protocol:
             # Bit 0 (0x01): Running - motor is currently moving
-            # Bit 1 (0x02): Blocked - motor stalled/obstructed (CRITICAL FOR DIAGNOSTICS)
+            # Bit 1 (0x02): Blocked - motor stalled/obstructed
             # Bit 2 (0x04): Initialized - axis has been initialized
             return {
                 'running': bool(status & 0x01),
@@ -590,7 +626,8 @@ class SkyWatcherProtocol:
         
         # Set target
         cmd = f":S{axis}{hex_target}"
-        if not self.send_command(cmd) or not self.send_command(cmd).startswith('='):
+        response = self.send_command(cmd)
+        if not response or not response.startswith('='):
             return False
         
         # Start motion
@@ -631,18 +668,19 @@ class TelescopeGUI:
     def __init__(self, root):
         self.root = root
         self.root.title(f"SkyWatcher Controller v{VERSION}")
-        self.root.geometry("1000x800")
+        self.root.geometry("1000x850")
         
-        # Configuration
-        self.config = Config()
+        # Database configuration
+        self.db = DatabaseConfig()
         
-        # Determine log directory (parent of script location)
+        # Determine log directory (same as script location)
         script_path = Path(__file__).resolve()
         self.log_dir = script_path.parent
         
         # Initialize file logger
         self.file_logger = FileLogger(self.log_dir)
-        self.file_logger.log(f"Application started", level='INFO')
+        self.file_logger.set_debug_mode(self.db.get_bool('logging.debug_mode'))
+        self.file_logger.log(f"Application started v{VERSION}", level='INFO')
         self.file_logger.log(f"Log directory: {self.log_dir}", level='INFO')
         
         # Protocol instance
@@ -662,6 +700,9 @@ class TelescopeGUI:
         # Emergency stop flag
         self.estop_active = False
         
+        # Key press tracking for momentary mode
+        self.keys_pressed = set()
+        
         # Apply theme
         self.apply_theme()
         
@@ -671,9 +712,12 @@ class TelescopeGUI:
         # Bind keyboard controls
         self.bind_keyboard_controls()
         
-    def apply_theme(self):
-        """Apply color theme"""
-        theme = self.config.config['theme']
+        # Start position update timer
+        self.start_position_updates()
+    
+    def apply_theme(self, preview_theme=None):
+        """Apply color theme."""
+        theme = preview_theme or self.db.get_all_theme()
         
         style = ttk.Style()
         style.theme_use('clam')
@@ -681,14 +725,30 @@ class TelescopeGUI:
         # Configure styles
         style.configure('TFrame', background=theme['bg'])
         style.configure('TLabel', background=theme['bg'], foreground=theme['fg'])
+        style.configure('TLabelframe', background=theme['bg'], foreground=theme['fg'])
+        style.configure('TLabelframe.Label', background=theme['bg'], foreground=theme['fg'])
         style.configure('TButton', background=theme['button_bg'], foreground=theme['button_fg'])
         style.map('TButton', background=[('active', theme['accent'])])
+        style.configure('TCheckbutton', background=theme['bg'], foreground=theme['fg'])
+        style.configure('TRadiobutton', background=theme['bg'], foreground=theme['fg'])
+        style.configure('TNotebook', background=theme['bg'])
+        style.configure('TNotebook.Tab', background=theme['button_bg'], foreground=theme['fg'])
+        style.map('TNotebook.Tab', background=[('selected', theme['accent'])])
+        style.configure('TScale', background=theme['bg'])
+        style.configure('TEntry', fieldbackground=theme['button_bg'], foreground=theme['fg'])
+        style.configure('TSpinbox', fieldbackground=theme['button_bg'], foreground=theme['fg'])
+        style.configure('TCombobox', fieldbackground=theme['button_bg'], foreground=theme['fg'])
         
         # E-Stop style
-        style.configure('EStop.TButton', background=theme['estop'], foreground='white', font=('Arial', 12, 'bold'))
+        style.configure('EStop.TButton', background=theme['estop'], foreground='white', 
+                       font=('Arial', 12, 'bold'))
+        style.map('EStop.TButton', background=[('active', '#ff6666')])
         
         self.root.configure(bg=theme['bg'])
         
+        # Store current theme for use in widgets
+        self.current_theme = theme
+    
     def create_widgets(self):
         """Create all GUI widgets"""
         
@@ -698,10 +758,9 @@ class TelescopeGUI:
         
         # Create tabs
         self.create_control_tab()
-        self.create_status_tab()
+        self.create_diagnostics_tab()  # Combined status + mount info
         self.create_settings_tab()
-        self.create_info_tab()
-        
+    
     def create_control_tab(self):
         """Create control tab"""
         control_tab = ttk.Frame(self.notebook)
@@ -713,12 +772,12 @@ class TelescopeGUI:
         
         ttk.Label(conn_frame, text="IP:").grid(row=0, column=0, sticky='e')
         self.ip_entry = ttk.Entry(conn_frame, width=15)
-        self.ip_entry.insert(0, self.config.get('connection', 'ip'))
+        self.ip_entry.insert(0, self.db.get('connection.ip'))
         self.ip_entry.grid(row=0, column=1, padx=5)
         
         ttk.Label(conn_frame, text="Port:").grid(row=0, column=2, sticky='e')
         self.port_entry = ttk.Entry(conn_frame, width=8)
-        self.port_entry.insert(0, str(self.config.get('connection', 'port')))
+        self.port_entry.insert(0, self.db.get('connection.port'))
         self.port_entry.grid(row=0, column=3, padx=5)
         
         self.connect_btn = ttk.Button(conn_frame, text="Connect", command=self.toggle_connection)
@@ -732,14 +791,27 @@ class TelescopeGUI:
         dir_frame.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
         
         # Direction pad
-        ttk.Button(dir_frame, text="↑\nUP", command=lambda: self.move('up')).grid(row=0, column=1, padx=5, pady=5, sticky='nsew')
-        ttk.Button(dir_frame, text="←\nLEFT", command=lambda: self.move('left')).grid(row=1, column=0, padx=5, pady=5, sticky='nsew')
-        ttk.Button(dir_frame, text="STOP", command=self.stop_all).grid(row=1, column=1, padx=5, pady=5, sticky='nsew')
-        ttk.Button(dir_frame, text="→\nRIGHT", command=lambda: self.move('right')).grid(row=1, column=2, padx=5, pady=5, sticky='nsew')
-        ttk.Button(dir_frame, text="↓\nDOWN", command=lambda: self.move('down')).grid(row=2, column=1, padx=5, pady=5, sticky='nsew')
+        self.btn_up = ttk.Button(dir_frame, text="↑\nUP", width=8)
+        self.btn_up.grid(row=0, column=1, padx=5, pady=5, sticky='nsew')
+        
+        self.btn_left = ttk.Button(dir_frame, text="←\nLEFT", width=8)
+        self.btn_left.grid(row=1, column=0, padx=5, pady=5, sticky='nsew')
+        
+        self.btn_stop = ttk.Button(dir_frame, text="STOP", command=self.stop_all, width=8)
+        self.btn_stop.grid(row=1, column=1, padx=5, pady=5, sticky='nsew')
+        
+        self.btn_right = ttk.Button(dir_frame, text="→\nRIGHT", width=8)
+        self.btn_right.grid(row=1, column=2, padx=5, pady=5, sticky='nsew')
+        
+        self.btn_down = ttk.Button(dir_frame, text="↓\nDOWN", width=8)
+        self.btn_down.grid(row=2, column=1, padx=5, pady=5, sticky='nsew')
+        
+        # Bind button events based on control mode
+        self.setup_button_bindings()
         
         # Emergency Stop - Large and prominent
-        self.estop_btn = ttk.Button(dir_frame, text="🛑 EMERGENCY STOP", style='EStop.TButton', command=self.emergency_stop)
+        self.estop_btn = ttk.Button(dir_frame, text="🛑 EMERGENCY STOP", 
+                                    style='EStop.TButton', command=self.emergency_stop)
         self.estop_btn.grid(row=3, column=0, columnspan=3, sticky='ew', pady=10)
         
         # Speed control
@@ -747,23 +819,30 @@ class TelescopeGUI:
         speed_frame.grid(row=4, column=0, columnspan=3, pady=10, sticky='ew')
         
         ttk.Label(speed_frame, text="Speed (°/sec):").pack(side='left', padx=5)
-        self.speed_var = tk.DoubleVar(value=self.config.get('speed', 'default'))
-        self.speed_scale = ttk.Scale(speed_frame, from_=self.config.get('speed', 'min'), 
-                                     to=self.config.get('speed', 'max'),
+        self.speed_var = tk.DoubleVar(value=self.db.get_float('speed.default', 1.0))
+        self.speed_scale = ttk.Scale(speed_frame, 
+                                     from_=self.db.get_float('speed.min', 0.1), 
+                                     to=self.db.get_float('speed.max', 10.0),
                                      variable=self.speed_var, orient='horizontal')
         self.speed_scale.pack(side='left', fill='x', expand=True, padx=5)
         
         self.speed_label = ttk.Label(speed_frame, text=f"{self.speed_var.get():.2f}")
         self.speed_label.pack(side='left', padx=5)
-        self.speed_var.trace('w', self.update_speed_label)
+        self.speed_var.trace_add('write', self.update_speed_label)
+        
+        # Control mode indicator
+        control_mode = self.db.get('controls.mode', 'latching')
+        mode_text = "Mode: Latching (click to move)" if control_mode == 'latching' else "Mode: Momentary (hold to move)"
+        self.control_mode_label = ttk.Label(dir_frame, text=mode_text, font=('Arial', 8))
+        self.control_mode_label.grid(row=5, column=0, columnspan=3, pady=2)
         
         # Keyboard hints
-        hint_text = f"Keyboard: {self.config.get('controls', 'up').upper()}/{self.config.get('controls', 'down').upper()}/{self.config.get('controls', 'left').upper()}/{self.config.get('controls', 'right').upper()}, SPACE=Stop, ESC=E-Stop"
-        ttk.Label(dir_frame, text=hint_text, font=('Arial', 8)).grid(row=5, column=0, columnspan=3, pady=5)
+        hint_text = f"Keys: {self.db.get('controls.up', 'w').upper()}/{self.db.get('controls.down', 's').upper()}/{self.db.get('controls.left', 'a').upper()}/{self.db.get('controls.right', 'd').upper()}, SPACE=Stop, ESC=E-Stop"
+        ttk.Label(dir_frame, text=hint_text, font=('Arial', 8)).grid(row=6, column=0, columnspan=3, pady=5)
         
-        # Axis status indicators (for diagnostic monitoring)
+        # Axis status indicators
         indicator_frame = ttk.LabelFrame(dir_frame, text="Axis Status (Live)")
-        indicator_frame.grid(row=6, column=0, columnspan=3, sticky='ew', pady=10, padx=5)
+        indicator_frame.grid(row=7, column=0, columnspan=3, sticky='ew', pady=10, padx=5)
         
         ttk.Label(indicator_frame, text="Azimuth:").grid(row=0, column=0, padx=5, pady=2, sticky='e')
         self.az_status_indicator = ttk.Label(indicator_frame, text="● Unknown", foreground='gray', font=('Arial', 10))
@@ -796,13 +875,13 @@ class TelescopeGUI:
         self.pos_frame.grid(row=1, column=2, sticky='nsew', padx=5, pady=5)
         
         # Show/hide positions toggle
-        self.show_pos_var = tk.BooleanVar(value=self.config.get('display', 'show_positions'))
+        self.show_pos_var = tk.BooleanVar(value=self.db.get_bool('display.show_positions', True))
         ttk.Checkbutton(self.pos_frame, text="Show Positions", variable=self.show_pos_var,
                        command=self.toggle_position_display).pack(anchor='w', pady=5)
         
         # Position format selector
         ttk.Label(self.pos_frame, text="Display Format:").pack(anchor='w', pady=5)
-        self.pos_format_var = tk.StringVar(value=self.config.get('display', 'position_format'))
+        self.pos_format_var = tk.StringVar(value=self.db.get('display.position_format', 'both'))
         
         formats = [
             ('Degrees', 'degrees'),
@@ -813,7 +892,7 @@ class TelescopeGUI:
         
         for text, value in formats:
             ttk.Radiobutton(self.pos_frame, text=text, variable=self.pos_format_var,
-                          value=value, command=self.update_position_display).pack(anchor='w')
+                          value=value, command=self.update_position_format).pack(anchor='w')
         
         # Position labels (will be populated based on format)
         self.pos_display_frame = ttk.Frame(self.pos_frame)
@@ -821,200 +900,53 @@ class TelescopeGUI:
         
         self.create_position_labels()
         
+        # Refresh button
+        ttk.Button(self.pos_frame, text="Refresh Now", command=self.refresh_positions).pack(pady=5)
+        
         # Configure grid weights
         control_tab.columnconfigure(0, weight=1)
         control_tab.columnconfigure(1, weight=1)
         control_tab.columnconfigure(2, weight=1)
         control_tab.rowconfigure(1, weight=1)
         
-    def create_status_tab(self):
-        """Create status tab"""
-        status_tab = ttk.Frame(self.notebook)
-        self.notebook.add(status_tab, text="Status")
+        # Log frame at bottom
+        log_frame = ttk.LabelFrame(control_tab, text="Activity Log", padding=5)
+        log_frame.grid(row=2, column=0, columnspan=3, sticky='ew', padx=5, pady=5)
         
-        # Auto-update control
-        auto_frame = ttk.Frame(status_tab)
-        auto_frame.pack(fill='x', padx=10, pady=10)
-        
-        self.auto_update_var = tk.BooleanVar(value=self.config.get('display', 'auto_update'))
-        ttk.Checkbutton(auto_frame, text="Auto-update", variable=self.auto_update_var,
-                       command=self.toggle_auto_update).pack(side='left', padx=5)
-        
-        ttk.Label(auto_frame, text="Rate (Hz):").pack(side='left', padx=5)
-        self.update_rate_var = tk.DoubleVar(value=self.config.get('display', 'update_rate'))
-        rate_spin = ttk.Spinbox(auto_frame, from_=0.1, to=10, increment=0.1, 
-                               textvariable=self.update_rate_var, width=5)
-        rate_spin.pack(side='left', padx=5)
-        
-        ttk.Button(auto_frame, text="Refresh Now", command=self.refresh_status).pack(side='left', padx=20)
-        
-        # Status display
-        self.status_text = scrolledtext.ScrolledText(status_tab, height=25, width=90,
-                                                     font=('Courier', 10))
-        self.status_text.pack(fill='both', expand=True, padx=10, pady=10)
-        
-    def create_settings_tab(self):
-        """Create settings tab"""
-        settings_tab = ttk.Frame(self.notebook)
-        self.notebook.add(settings_tab, text="Settings")
-        
-        # Create notebook for settings sections
-        settings_notebook = ttk.Notebook(settings_tab)
-        settings_notebook.pack(fill='both', expand=True, padx=5, pady=5)
-        
-        # Keyboard controls settings
-        kb_frame = ttk.Frame(settings_notebook)
-        settings_notebook.add(kb_frame, text="Keyboard")
-        
-        ttk.Label(kb_frame, text="Configure Keyboard Controls", 
-                 font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        controls_grid = ttk.Frame(kb_frame)
-        controls_grid.pack(pady=10)
-        
-        self.key_entries = {}
-        controls = [
-            ('up', 'Move Up'),
-            ('down', 'Move Down'),
-            ('left', 'Move Left'),
-            ('right', 'Move Right'),
-            ('stop', 'Stop'),
-            ('estop', 'Emergency Stop'),
-            ('speed_up', 'Speed Up'),
-            ('speed_down', 'Speed Down')
-        ]
-        
-        for i, (key, label) in enumerate(controls):
-            ttk.Label(controls_grid, text=label + ":").grid(row=i, column=0, sticky='e', padx=5, pady=5)
-            entry = ttk.Entry(controls_grid, width=15)
-            entry.insert(0, self.config.get('controls', key))
-            entry.grid(row=i, column=1, padx=5, pady=5)
-            self.key_entries[key] = entry
-        
-        ttk.Button(kb_frame, text="Save Keyboard Settings", 
-                  command=self.save_keyboard_settings).pack(pady=10)
-        
-        # Theme settings
-        theme_frame = ttk.Frame(settings_notebook)
-        settings_notebook.add(theme_frame, text="Theme")
-        
-        ttk.Label(theme_frame, text="Configure Color Theme", 
-                 font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        theme_grid = ttk.Frame(theme_frame)
-        theme_grid.pack(pady=10)
-        
-        self.theme_buttons = {}
-        theme_items = [
-            ('bg', 'Background'),
-            ('fg', 'Foreground'),
-            ('button_bg', 'Button Background'),
-            ('button_fg', 'Button Foreground'),
-            ('accent', 'Accent Color'),
-            ('estop', 'E-Stop Color')
-        ]
-        
-        for i, (key, label) in enumerate(theme_items):
-            ttk.Label(theme_grid, text=label + ":").grid(row=i, column=0, sticky='e', padx=5, pady=5)
-            btn = ttk.Button(theme_grid, text="Choose Color", 
-                           command=lambda k=key: self.choose_color(k))
-            btn.grid(row=i, column=1, padx=5, pady=5)
-            self.theme_buttons[key] = btn
-        
-        ttk.Button(theme_frame, text="Save Theme Settings", 
-                  command=self.save_theme_settings).pack(pady=10)
-        ttk.Button(theme_frame, text="Reset to Default Theme", 
-                  command=self.reset_theme).pack(pady=5)
-        
-        # Connection settings
-        conn_settings_frame = ttk.Frame(settings_notebook)
-        settings_notebook.add(conn_settings_frame, text="Connection")
-        
-        ttk.Label(conn_settings_frame, text="Default Connection Settings", 
-                 font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        conn_grid = ttk.Frame(conn_settings_frame)
-        conn_grid.pack(pady=10)
-        
-        ttk.Label(conn_grid, text="Default IP:").grid(row=0, column=0, sticky='e', padx=5, pady=5)
-        self.default_ip_entry = ttk.Entry(conn_grid, width=20)
-        self.default_ip_entry.insert(0, self.config.get('connection', 'ip'))
-        self.default_ip_entry.grid(row=0, column=1, padx=5, pady=5)
-        
-        ttk.Label(conn_grid, text="Default Port:").grid(row=1, column=0, sticky='e', padx=5, pady=5)
-        self.default_port_entry = ttk.Entry(conn_grid, width=20)
-        self.default_port_entry.insert(0, str(self.config.get('connection', 'port')))
-        self.default_port_entry.grid(row=1, column=1, padx=5, pady=5)
-        
-        ttk.Label(conn_grid, text="Timeout (sec):").grid(row=2, column=0, sticky='e', padx=5, pady=5)
-        self.timeout_entry = ttk.Entry(conn_grid, width=20)
-        self.timeout_entry.insert(0, str(self.config.get('connection', 'timeout')))
-        self.timeout_entry.grid(row=2, column=1, padx=5, pady=5)
-        
-        ttk.Button(conn_settings_frame, text="Save Connection Settings", 
-                  command=self.save_connection_settings).pack(pady=10)
-        
-        # Logging settings
-        logging_frame = ttk.Frame(settings_notebook)
-        settings_notebook.add(logging_frame, text="Logging")
-        
-        ttk.Label(logging_frame, text="Logging Configuration", 
-                 font=('Arial', 12, 'bold')).pack(pady=10)
-        
-        # Debug mode checkbox
-        self.debug_mode_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(logging_frame, text="Debug Mode (log all commands/responses)", 
-                       variable=self.debug_mode_var,
-                       command=self.toggle_debug_mode).pack(anchor='w', padx=20, pady=5)
-        
-        ttk.Label(logging_frame, text="When enabled, every command sent and response received\n"
-                 "will be recorded in the log file for detailed analysis.",
-                 font=('Arial', 9), foreground='gray').pack(anchor='w', padx=40, pady=5)
-        
-        # Log file location
-        ttk.Separator(logging_frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
-        
-        ttk.Label(logging_frame, text="Log File Location:", font=('Arial', 10, 'bold')).pack(anchor='w', padx=20, pady=5)
-        
-        log_path_text = str(self.file_logger.log_path) if self.file_logger.log_path else "Not created"
-        self.log_path_label = ttk.Label(logging_frame, text=log_path_text, font=('Courier', 9))
-        self.log_path_label.pack(anchor='w', padx=40, pady=5)
-        
-        ttk.Button(logging_frame, text="Open Log Folder", 
-                  command=self.open_log_folder).pack(anchor='w', padx=20, pady=10)
-        
-        # Status monitoring info
-        ttk.Separator(logging_frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
-        
-        ttk.Label(logging_frame, text="Status Monitoring:", font=('Arial', 10, 'bold')).pack(anchor='w', padx=20, pady=5)
-        ttk.Label(logging_frame, text="Status polling interval: 200ms\n"
-                 "Watching for: Running bit (0x01), Blocked bit (0x02), Init bit (0x04)\n\n"
-                 "If azimuth stops and Blocked bit (0x02) is set:\n"
-                 "  → Motor controller detected obstruction\n\n"
-                 "If azimuth stops WITHOUT Blocked bit:\n"
-                 "  → PTC fuse likely tripped before controller knew",
-                 font=('Arial', 9), justify='left').pack(anchor='w', padx=40, pady=5)
-        
-    def create_info_tab(self):
-        """Create info tab"""
-        info_tab = ttk.Frame(self.notebook)
-        self.notebook.add(info_tab, text="Mount Info")
-        
-        ttk.Button(info_tab, text="Query Mount Information", 
-                  command=self.query_system_info).pack(pady=10)
-        
-        self.info_text = scrolledtext.ScrolledText(info_tab, height=30, width=90,
-                                                   font=('Courier', 10))
-        self.info_text.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        # Command log
-        log_frame = ttk.LabelFrame(info_tab, text="Command Log", padding=5)
-        log_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, width=90,
-                                                  font=('Courier', 9))
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=6, width=90,
+                                                  font=('Courier', 9), state='disabled')
         self.log_text.pack(fill='both', expand=True)
+    
+    def setup_button_bindings(self):
+        """Setup button bindings based on control mode."""
+        control_mode = self.db.get('controls.mode', 'latching')
         
+        if control_mode == 'momentary':
+            # Momentary mode: press to start, release to stop
+            self.btn_up.bind('<ButtonPress-1>', lambda e: self.move('up'))
+            self.btn_up.bind('<ButtonRelease-1>', lambda e: self.stop_axis(2))
+            self.btn_down.bind('<ButtonPress-1>', lambda e: self.move('down'))
+            self.btn_down.bind('<ButtonRelease-1>', lambda e: self.stop_axis(2))
+            self.btn_left.bind('<ButtonPress-1>', lambda e: self.move('left'))
+            self.btn_left.bind('<ButtonRelease-1>', lambda e: self.stop_axis(1))
+            self.btn_right.bind('<ButtonPress-1>', lambda e: self.move('right'))
+            self.btn_right.bind('<ButtonRelease-1>', lambda e: self.stop_axis(1))
+        else:
+            # Latching mode: click to toggle
+            self.btn_up.configure(command=lambda: self.move('up'))
+            self.btn_down.configure(command=lambda: self.move('down'))
+            self.btn_left.configure(command=lambda: self.move('left'))
+            self.btn_right.configure(command=lambda: self.move('right'))
+            # Remove any press/release bindings
+            self.btn_up.unbind('<ButtonPress-1>')
+            self.btn_up.unbind('<ButtonRelease-1>')
+            self.btn_down.unbind('<ButtonPress-1>')
+            self.btn_down.unbind('<ButtonRelease-1>')
+            self.btn_left.unbind('<ButtonPress-1>')
+            self.btn_left.unbind('<ButtonRelease-1>')
+            self.btn_right.unbind('<ButtonPress-1>')
+            self.btn_right.unbind('<ButtonRelease-1>')
+    
     def create_position_labels(self):
         """Create position display labels based on format"""
         # Clear existing
@@ -1058,39 +990,317 @@ class TelescopeGUI:
             self.coord_label = ttk.Label(self.pos_display_frame, text="---", font=('Courier', 10), justify='left')
             self.coord_label.grid(row=0, column=1, sticky='w', padx=5)
     
+    def create_diagnostics_tab(self):
+        """Create combined diagnostics tab (replaces separate Status and Mount Info tabs)"""
+        diag_tab = ttk.Frame(self.notebook)
+        self.notebook.add(diag_tab, text="Diagnostics")
+        
+        # Top controls
+        control_frame = ttk.Frame(diag_tab)
+        control_frame.pack(fill='x', padx=10, pady=10)
+        
+        ttk.Button(control_frame, text="Query Mount Info", command=self.query_system_info).pack(side='left', padx=5)
+        ttk.Button(control_frame, text="Refresh Status", command=self.refresh_diagnostics).pack(side='left', padx=5)
+        
+        ttk.Separator(control_frame, orient='vertical').pack(side='left', fill='y', padx=10)
+        
+        self.auto_update_var = tk.BooleanVar(value=self.db.get_bool('display.auto_update'))
+        ttk.Checkbutton(control_frame, text="Auto-update", variable=self.auto_update_var,
+                       command=self.toggle_auto_update).pack(side='left', padx=5)
+        
+        ttk.Label(control_frame, text="Rate (Hz):").pack(side='left', padx=5)
+        self.update_rate_var = tk.DoubleVar(value=self.db.get_float('display.update_rate', 1.0))
+        rate_spin = ttk.Spinbox(control_frame, from_=0.1, to=10, increment=0.1, 
+                               textvariable=self.update_rate_var, width=5)
+        rate_spin.pack(side='left', padx=5)
+        
+        # Main content - scrolled text (read-only)
+        self.diag_text = scrolledtext.ScrolledText(diag_tab, height=35, width=100,
+                                                   font=('Courier', 10))
+        self.diag_text.pack(fill='both', expand=True, padx=10, pady=10)
+        self.diag_text.configure(state='disabled')  # Make read-only
+        
+        # Status legend at bottom
+        legend_frame = ttk.LabelFrame(diag_tab, text="Status Byte Legend", padding=5)
+        legend_frame.pack(fill='x', padx=10, pady=5)
+        
+        legend_text = "Bit 0 (0x01): Running | Bit 1 (0x02): Blocked | Bit 2 (0x04): Initialized"
+        ttk.Label(legend_frame, text=legend_text, font=('Courier', 9)).pack()
+    
+    def create_settings_tab(self):
+        """Create settings tab"""
+        settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(settings_tab, text="Settings")
+        
+        # Create notebook for settings sections
+        settings_notebook = ttk.Notebook(settings_tab)
+        settings_notebook.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        # Controls settings
+        self.create_controls_settings(settings_notebook)
+        
+        # Theme settings
+        self.create_theme_settings(settings_notebook)
+        
+        # Connection settings
+        self.create_connection_settings(settings_notebook)
+        
+        # Logging settings
+        self.create_logging_settings(settings_notebook)
+    
+    def create_controls_settings(self, parent_notebook):
+        """Create controls settings sub-tab"""
+        controls_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(controls_frame, text="Controls")
+        
+        # Control mode selection
+        mode_frame = ttk.LabelFrame(controls_frame, text="Control Mode", padding=10)
+        mode_frame.pack(fill='x', padx=10, pady=10)
+        
+        self.control_mode_var = tk.StringVar(value=self.db.get('controls.mode', 'latching'))
+        
+        ttk.Radiobutton(mode_frame, text="Latching - Click to start moving, click Stop to stop",
+                       variable=self.control_mode_var, value='latching').pack(anchor='w', pady=2)
+        ttk.Radiobutton(mode_frame, text="Momentary - Hold button/key to move, release to stop",
+                       variable=self.control_mode_var, value='momentary').pack(anchor='w', pady=2)
+        
+        # Keyboard controls
+        kb_frame = ttk.LabelFrame(controls_frame, text="Keyboard Bindings", padding=10)
+        kb_frame.pack(fill='x', padx=10, pady=10)
+        
+        controls_grid = ttk.Frame(kb_frame)
+        controls_grid.pack(pady=10)
+        
+        self.key_entries = {}
+        controls = [
+            ('up', 'Move Up'),
+            ('down', 'Move Down'),
+            ('left', 'Move Left'),
+            ('right', 'Move Right'),
+            ('stop', 'Stop'),
+            ('estop', 'Emergency Stop'),
+        ]
+        
+        for i, (key, label) in enumerate(controls):
+            ttk.Label(controls_grid, text=label + ":").grid(row=i, column=0, sticky='e', padx=5, pady=5)
+            entry = ttk.Entry(controls_grid, width=15)
+            entry.insert(0, self.db.get(f'controls.{key}', ''))
+            entry.grid(row=i, column=1, padx=5, pady=5)
+            self.key_entries[key] = entry
+        
+        ttk.Button(controls_frame, text="Save Control Settings", 
+                  command=self.save_control_settings).pack(pady=10)
+    
+    def create_theme_settings(self, parent_notebook):
+        """Create theme settings sub-tab with preview"""
+        theme_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(theme_frame, text="Theme")
+        
+        # Theme color options with swatches
+        colors_frame = ttk.LabelFrame(theme_frame, text="Colors", padding=10)
+        colors_frame.pack(fill='x', padx=10, pady=10)
+        
+        self.theme_swatches = {}
+        self.theme_values = {}
+        
+        theme_items = [
+            ('bg', 'Background'),
+            ('fg', 'Foreground (Text)'),
+            ('button_bg', 'Button Background'),
+            ('button_fg', 'Button Text'),
+            ('accent', 'Accent Color'),
+            ('estop', 'E-Stop Color')
+        ]
+        
+        for i, (key, label) in enumerate(theme_items):
+            current_color = self.db.get(f'theme.{key}')
+            self.theme_values[key] = tk.StringVar(value=current_color)
+            
+            ttk.Label(colors_frame, text=label + ":").grid(row=i, column=0, sticky='e', padx=5, pady=5)
+            
+            # Color swatch (canvas)
+            swatch = tk.Canvas(colors_frame, width=30, height=20, highlightthickness=1)
+            swatch.grid(row=i, column=1, padx=5, pady=5)
+            swatch.create_rectangle(0, 0, 30, 20, fill=current_color, outline='gray')
+            self.theme_swatches[key] = swatch
+            
+            # Color value entry
+            entry = ttk.Entry(colors_frame, textvariable=self.theme_values[key], width=10)
+            entry.grid(row=i, column=2, padx=5, pady=5)
+            
+            # Choose button
+            btn = ttk.Button(colors_frame, text="Choose", 
+                           command=lambda k=key: self.choose_theme_color(k))
+            btn.grid(row=i, column=3, padx=5, pady=5)
+        
+        # Preview and apply buttons
+        btn_frame = ttk.Frame(theme_frame)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, text="Preview Theme", command=self.preview_theme).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Apply & Save Theme", command=self.save_theme_settings).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Reset to Default", command=self.reset_theme).pack(side='left', padx=5)
+    
+    def create_connection_settings(self, parent_notebook):
+        """Create connection settings sub-tab"""
+        conn_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(conn_frame, text="Connection")
+        
+        ttk.Label(conn_frame, text="Default Connection Settings", 
+                 font=('Arial', 12, 'bold')).pack(pady=10)
+        
+        conn_grid = ttk.Frame(conn_frame)
+        conn_grid.pack(pady=10)
+        
+        ttk.Label(conn_grid, text="Default IP:").grid(row=0, column=0, sticky='e', padx=5, pady=5)
+        self.default_ip_entry = ttk.Entry(conn_grid, width=20)
+        self.default_ip_entry.insert(0, self.db.get('connection.ip'))
+        self.default_ip_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(conn_grid, text="Default Port:").grid(row=1, column=0, sticky='e', padx=5, pady=5)
+        self.default_port_entry = ttk.Entry(conn_grid, width=20)
+        self.default_port_entry.insert(0, self.db.get('connection.port'))
+        self.default_port_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(conn_grid, text="Timeout (sec):").grid(row=2, column=0, sticky='e', padx=5, pady=5)
+        self.timeout_entry = ttk.Entry(conn_grid, width=20)
+        self.timeout_entry.insert(0, self.db.get('connection.timeout'))
+        self.timeout_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Button(conn_frame, text="Save Connection Settings", 
+                  command=self.save_connection_settings).pack(pady=10)
+    
+    def create_logging_settings(self, parent_notebook):
+        """Create logging settings sub-tab"""
+        logging_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(logging_frame, text="Logging")
+        
+        ttk.Label(logging_frame, text="Logging Configuration", 
+                 font=('Arial', 12, 'bold')).pack(pady=10)
+        
+        # Debug mode checkbox
+        self.debug_mode_var = tk.BooleanVar(value=self.db.get_bool('logging.debug_mode'))
+        ttk.Checkbutton(logging_frame, text="Debug Mode (log all commands/responses)", 
+                       variable=self.debug_mode_var,
+                       command=self.toggle_debug_mode).pack(anchor='w', padx=20, pady=5)
+        
+        ttk.Label(logging_frame, text="When enabled, every command sent and response received\n"
+                 "will be recorded in the log file for detailed analysis.",
+                 font=('Arial', 9)).pack(anchor='w', padx=40, pady=5)
+        
+        # Log file location
+        ttk.Separator(logging_frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
+        
+        ttk.Label(logging_frame, text="Log File Location:", font=('Arial', 10, 'bold')).pack(anchor='w', padx=20, pady=5)
+        
+        log_path_text = str(self.file_logger.log_path) if self.file_logger.log_path else "Not created"
+        self.log_path_label = ttk.Label(logging_frame, text=log_path_text, font=('Courier', 9))
+        self.log_path_label.pack(anchor='w', padx=40, pady=5)
+        
+        ttk.Button(logging_frame, text="Open Log Folder", 
+                  command=self.open_log_folder).pack(anchor='w', padx=20, pady=10)
+    
     def bind_keyboard_controls(self):
         """Bind keyboard controls"""
-        controls = self.config.config['controls']
+        control_mode = self.db.get('controls.mode', 'latching')
         
-        # Bind each control
-        self.root.bind(f"<KeyPress-{controls['up']}>", lambda e: self.move('up'))
-        self.root.bind(f"<KeyPress-{controls['down']}>", lambda e: self.move('down'))
-        self.root.bind(f"<KeyPress-{controls['left']}>", lambda e: self.move('left'))
-        self.root.bind(f"<KeyPress-{controls['right']}>", lambda e: self.move('right'))
+        # Get key bindings
+        up_key = self.db.get('controls.up', 'w')
+        down_key = self.db.get('controls.down', 's')
+        left_key = self.db.get('controls.left', 'a')
+        right_key = self.db.get('controls.right', 'd')
+        stop_key = self.db.get('controls.stop', 'space')
+        estop_key = self.db.get('controls.estop', 'Escape')
         
-        # Arrow keys
-        self.root.bind("<Up>", lambda e: self.move('up'))
-        self.root.bind("<Down>", lambda e: self.move('down'))
-        self.root.bind("<Left>", lambda e: self.move('left'))
-        self.root.bind("<Right>", lambda e: self.move('right'))
+        # Clear existing bindings
+        for key in ['w', 's', 'a', 'd', 'space', 'Escape', 'Up', 'Down', 'Left', 'Right']:
+            try:
+                self.root.unbind(f"<KeyPress-{key}>")
+                self.root.unbind(f"<KeyRelease-{key}>")
+            except:
+                pass
         
-        # Stop and E-stop
-        self.root.bind(f"<KeyPress-{controls['stop']}>", lambda e: self.stop_all())
-        self.root.bind(f"<KeyPress-{controls['estop']}>", lambda e: self.emergency_stop())
+        if control_mode == 'momentary':
+            # Momentary mode: press to move, release to stop
+            self.root.bind(f"<KeyPress-{up_key}>", lambda e: self.key_move('up'))
+            self.root.bind(f"<KeyRelease-{up_key}>", lambda e: self.key_release('up'))
+            self.root.bind(f"<KeyPress-{down_key}>", lambda e: self.key_move('down'))
+            self.root.bind(f"<KeyRelease-{down_key}>", lambda e: self.key_release('down'))
+            self.root.bind(f"<KeyPress-{left_key}>", lambda e: self.key_move('left'))
+            self.root.bind(f"<KeyRelease-{left_key}>", lambda e: self.key_release('left'))
+            self.root.bind(f"<KeyPress-{right_key}>", lambda e: self.key_move('right'))
+            self.root.bind(f"<KeyRelease-{right_key}>", lambda e: self.key_release('right'))
+            
+            # Arrow keys
+            self.root.bind("<KeyPress-Up>", lambda e: self.key_move('up'))
+            self.root.bind("<KeyRelease-Up>", lambda e: self.key_release('up'))
+            self.root.bind("<KeyPress-Down>", lambda e: self.key_move('down'))
+            self.root.bind("<KeyRelease-Down>", lambda e: self.key_release('down'))
+            self.root.bind("<KeyPress-Left>", lambda e: self.key_move('left'))
+            self.root.bind("<KeyRelease-Left>", lambda e: self.key_release('left'))
+            self.root.bind("<KeyPress-Right>", lambda e: self.key_move('right'))
+            self.root.bind("<KeyRelease-Right>", lambda e: self.key_release('right'))
+        else:
+            # Latching mode: press to toggle
+            self.root.bind(f"<KeyPress-{up_key}>", lambda e: self.move('up'))
+            self.root.bind(f"<KeyPress-{down_key}>", lambda e: self.move('down'))
+            self.root.bind(f"<KeyPress-{left_key}>", lambda e: self.move('left'))
+            self.root.bind(f"<KeyPress-{right_key}>", lambda e: self.move('right'))
+            
+            # Arrow keys
+            self.root.bind("<Up>", lambda e: self.move('up'))
+            self.root.bind("<Down>", lambda e: self.move('down'))
+            self.root.bind("<Left>", lambda e: self.move('left'))
+            self.root.bind("<Right>", lambda e: self.move('right'))
         
-        # Speed controls
-        self.root.bind(f"<KeyPress-{controls['speed_up']}>", lambda e: self.adjust_speed(0.5))
-        self.root.bind(f"<KeyPress-{controls['speed_down']}>", lambda e: self.adjust_speed(-0.5))
+        # Stop and E-stop (always the same)
+        self.root.bind(f"<KeyPress-{stop_key}>", lambda e: self.stop_all())
+        self.root.bind(f"<KeyPress-{estop_key}>", lambda e: self.emergency_stop())
+    
+    def key_move(self, direction):
+        """Handle key press for movement (momentary mode)"""
+        if direction not in self.keys_pressed:
+            self.keys_pressed.add(direction)
+            self.move(direction)
+    
+    def key_release(self, direction):
+        """Handle key release (momentary mode)"""
+        if direction in self.keys_pressed:
+            self.keys_pressed.discard(direction)
+            # Stop the appropriate axis
+            if direction in ('up', 'down'):
+                self.stop_axis(2)
+            else:
+                self.stop_axis(1)
+    
+    def stop_axis(self, axis):
+        """Stop a single axis"""
+        if not self.connected:
+            return
+        
+        axis_str = str(axis)
+        self.protocol.stop_motion(axis_str)
+        self.axes_moving[axis] = False
     
     def log(self, message):
-        """Add message to log"""
+        """Add message to activity log"""
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.log_text.configure(state='normal')
         self.log_text.insert('end', f"[{timestamp}] {message}\n")
         self.log_text.see('end')
+        self.log_text.configure(state='disabled')
+        
+        # Also log to file
+        self.file_logger.log(message, level='INFO')
     
     def toggle_connection(self):
         """Connect or disconnect"""
         if self.connected:
+            # Stop status monitor
+            if self.status_monitor:
+                self.status_monitor.stop()
+                self.status_monitor = None
+            
             self.stop_all()
             if self.protocol:
                 self.protocol.close()
@@ -1099,12 +1309,6 @@ class TelescopeGUI:
             self.connect_btn.configure(text="Connect")
             self.status_label.configure(text="Disconnected", foreground="red")
             self.log("Disconnected")
-            self.file_logger.log("Disconnected from mount", level='INFO')
-            
-            # Stop status monitor
-            if self.status_monitor:
-                self.status_monitor.stop()
-                self.status_monitor = None
             
             if self.auto_update_var.get():
                 self.auto_update_var.set(False)
@@ -1112,10 +1316,9 @@ class TelescopeGUI:
         else:
             ip = self.ip_entry.get()
             port = int(self.port_entry.get())
-            timeout = self.config.get('connection', 'timeout')
+            timeout = self.db.get_float('connection.timeout', 2.0)
             
             self.log(f"Connecting to {ip}:{port} with timeout={timeout}s...")
-            self.file_logger.log(f"Attempting connection to {ip}:{port}", level='INFO')
             self.protocol = SkyWatcherProtocol(ip, port, timeout, log_callback=self.log)
             
             try:
@@ -1126,7 +1329,6 @@ class TelescopeGUI:
                     self.status_label.configure(text="Connected", foreground="green")
                     self.log(f"✓ Connected to {ip}:{port}")
                     self.log(f"Motor board version: {version}")
-                    self.file_logger.log(f"Connected successfully. Version: {version}", level='INFO')
                     
                     self.log("Initializing axes...")
                     # CRITICAL: Initialize both axes before they will move!
@@ -1156,22 +1358,20 @@ class TelescopeGUI:
                     if timer_freq:
                         self.log(f"Timer Frequency: {timer_freq:,} Hz")
                     
-                    # Start status monitor for diagnostic polling
+                    # Start status monitor
                     self.status_monitor = StatusMonitor(self.protocol, self.file_logger, self.on_status_update)
                     self.status_monitor.start()
                     self.log("✓ Status monitor started (200ms polling)")
                     
-                    self.log("✓ Mount ready! Press W/A/S/D or use buttons to move.")
+                    self.log("✓ Mount ready! Use controls to move.")
                 else:
                     self.log("✗ Failed to get version from mount")
-                    self.file_logger.log("Connection failed: no version response", level='ERROR')
                     messagebox.showerror("Connection Error", 
                                        "Could not connect to telescope.")
                     self.protocol.close()
                     self.protocol = None
             except Exception as e:
                 self.log(f"✗ Connection error: {e}")
-                self.file_logger.log(f"Connection error: {e}", level='ERROR')
                 messagebox.showerror("Connection Error", str(e))
                 if self.protocol:
                     self.protocol.close()
@@ -1188,8 +1388,7 @@ class TelescopeGUI:
             return
         
         speed = self.speed_var.get()
-        self.log(f"=== MOVE {direction.upper()} requested at {speed:.2f}°/sec ===")
-        self.file_logger.log(f"Move {direction} at {speed:.2f}°/sec", level='INFO')
+        self.log(f"=== MOVE {direction.upper()} at {speed:.2f}°/sec ===")
         
         if direction == 'up':
             self.axes_moving[2] = True
@@ -1207,17 +1406,15 @@ class TelescopeGUI:
     def stop_all(self):
         """Stop all motion"""
         if not self.connected:
-            self.log("✗ Not connected")
             return
         
-        self.log("=== STOP ALL requested ===")
-        self.file_logger.log("Stop all motion", level='INFO')
+        self.log("=== STOP ALL ===")
         self.protocol.stop_motion(self.protocol.AXIS_AZ)
         self.protocol.stop_motion(self.protocol.AXIS_ALT)
         self.axes_moving = {1: False, 2: False}
+        self.keys_pressed.clear()
         self.estop_active = False
         self.estop_btn.configure(text="🛑 EMERGENCY STOP")
-        self.log("✓ All axes stopped, E-Stop cleared")
     
     def emergency_stop(self):
         """Emergency stop - instant stop both axes"""
@@ -1226,12 +1423,230 @@ class TelescopeGUI:
         
         self.estop_active = True
         self.axes_moving = {1: False, 2: False}
+        self.keys_pressed.clear()
         self.protocol.instant_stop(self.protocol.AXIS_AZ)
         self.protocol.instant_stop(self.protocol.AXIS_ALT)
         self.estop_btn.configure(text="⚠️ E-STOP ACTIVE - Click STOP to Clear")
         self.log("⚠️ EMERGENCY STOP ACTIVATED")
-        self.file_logger.log("EMERGENCY STOP activated", level='WARNING')
         messagebox.showwarning("Emergency Stop", "Emergency stop activated!\nClick STOP button to clear.")
+    
+    def on_status_update(self, axis: int, status: dict):
+        """Callback from StatusMonitor when status changes."""
+        self.root.after(0, lambda: self._update_status_display(axis, status))
+    
+    def _update_status_display(self, axis: int, status: dict):
+        """Update the status indicator display (runs in main thread)."""
+        raw = status.get('raw', 0)
+        running = status.get('running', False)
+        blocked = status.get('blocked', False)
+        
+        # Determine indicator and color
+        if blocked:
+            indicator_text = "⚠ BLOCKED"
+            color = 'red'
+            axis_name = "Azimuth" if axis == 1 else "Altitude"
+            self.log(f"⚠ {axis_name} BLOCKED detected! Status: {StatusDecoder.to_string(raw)}")
+        elif running:
+            indicator_text = "● Moving"
+            color = 'blue'
+        else:
+            indicator_text = "● Stopped"
+            color = 'gray'
+        
+        raw_text = StatusDecoder.to_string(raw)
+        
+        if axis == 1:
+            self.az_status_indicator.configure(text=indicator_text, foreground=color)
+            self.az_status_raw.configure(text=raw_text)
+            
+            # Check for unexpected stop
+            if self.axes_moving.get(1) and not running and not blocked:
+                self.log(f"⚠ Azimuth stopped WITHOUT blocked bit! Status: {raw_text}")
+                self.axes_moving[1] = False
+        else:
+            self.alt_status_indicator.configure(text=indicator_text, foreground=color)
+            self.alt_status_raw.configure(text=raw_text)
+            
+            if self.axes_moving.get(2) and not running and not blocked:
+                self.log(f"⚠ Altitude stopped WITHOUT blocked bit! Status: {raw_text}")
+                self.axes_moving[2] = False
+    
+    def start_position_updates(self):
+        """Start the position update timer"""
+        self.update_position_display()
+        self.root.after(1000, self.start_position_updates)
+    
+    def update_position_display(self):
+        """Update the position display"""
+        if not self.connected or not self.show_pos_var.get():
+            return
+        
+        try:
+            az_pos = self.protocol.get_position(self.protocol.AXIS_AZ)
+            alt_pos = self.protocol.get_position(self.protocol.AXIS_ALT)
+            
+            if az_pos is None or alt_pos is None:
+                return
+            
+            format_type = self.pos_format_var.get()
+            
+            if format_type == 'degrees':
+                az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
+                alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
+                
+                if az_deg is not None and hasattr(self, 'az_deg_label'):
+                    self.az_deg_label.configure(text=f"{az_deg:.4f}°")
+                if alt_deg is not None and hasattr(self, 'alt_deg_label'):
+                    self.alt_deg_label.configure(text=f"{alt_deg:.4f}°")
+                    
+            elif format_type == 'raw':
+                if hasattr(self, 'az_raw_label'):
+                    self.az_raw_label.configure(text=f"{az_pos:,} (0x{az_pos:08X})")
+                if hasattr(self, 'alt_raw_label'):
+                    self.alt_raw_label.configure(text=f"{alt_pos:,} (0x{alt_pos:08X})")
+                
+            elif format_type == 'both':
+                az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
+                alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
+                
+                if az_deg is not None and hasattr(self, 'az_both_label'):
+                    self.az_both_label.configure(text=f"{az_deg:.4f}° ({az_pos:,})")
+                if alt_deg is not None and hasattr(self, 'alt_both_label'):
+                    self.alt_both_label.configure(text=f"{alt_deg:.4f}° ({alt_pos:,})")
+                    
+            elif format_type == 'coordinates':
+                az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
+                alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
+                
+                if az_deg is not None and alt_deg is not None and hasattr(self, 'coord_label'):
+                    az_deg = az_deg % 360
+                    coord_text = f"Az: {az_deg:.4f}°\nAlt: {alt_deg:.4f}°"
+                    self.coord_label.configure(text=coord_text)
+        except Exception:
+            pass
+    
+    def refresh_positions(self):
+        """Manual position refresh"""
+        self.update_position_display()
+    
+    def toggle_position_display(self):
+        """Toggle position display"""
+        self.db.set('display.show_positions', str(self.show_pos_var.get()))
+        self.create_position_labels()
+    
+    def update_position_format(self):
+        """Update position display format"""
+        self.db.set('display.position_format', self.pos_format_var.get())
+        self.create_position_labels()
+    
+    def refresh_diagnostics(self):
+        """Refresh the diagnostics display"""
+        if not self.connected:
+            return
+        
+        self.diag_text.configure(state='normal')
+        self.diag_text.delete('1.0', 'end')
+        
+        # Get status for both axes
+        for axis_name, axis_id in [("AZIMUTH (Axis 1)", '1'), ("ALTITUDE (Axis 2)", '2')]:
+            self.diag_text.insert('end', f"\n{'='*60}\n")
+            self.diag_text.insert('end', f"{axis_name}\n")
+            self.diag_text.insert('end', f"{'='*60}\n\n")
+            
+            # Position
+            pos = self.protocol.get_position(axis_id)
+            if pos is not None:
+                deg = self.protocol.counts_to_degrees(pos, axis_id)
+                self.diag_text.insert('end', f"Position (counts): {pos:,} (0x{pos+0x800000:06X})\n")
+                if deg is not None:
+                    self.diag_text.insert('end', f"Position (degrees): {deg:.6f}°\n")
+            else:
+                self.diag_text.insert('end', "Position: Unable to read\n")
+            
+            # Status
+            status = self.protocol.get_status(axis_id)
+            if status:
+                self.diag_text.insert('end', f"\nStatus (raw: 0x{status['raw']:02X}):\n")
+                self.diag_text.insert('end', f"  Running:     {status['running']}\n")
+                self.diag_text.insert('end', f"  Blocked:     {status['blocked']}\n")
+                self.diag_text.insert('end', f"  Initialized: {status['initialized']}\n")
+            else:
+                self.diag_text.insert('end', "\nStatus: Unable to read\n")
+        
+        self.diag_text.configure(state='disabled')
+    
+    def query_system_info(self):
+        """Query system information"""
+        if not self.connected:
+            messagebox.showwarning("Not Connected", "Connect first")
+            return
+        
+        self.diag_text.configure(state='normal')
+        self.diag_text.delete('1.0', 'end')
+        
+        self.diag_text.insert('end', "MOUNT SYSTEM INFORMATION\n")
+        self.diag_text.insert('end', "=" * 60 + "\n\n")
+        
+        # Timer frequency (global)
+        timer_freq = self.protocol.get_timer_freq()
+        if timer_freq:
+            self.diag_text.insert('end', f"Timer Frequency: {timer_freq:,} Hz (0x{timer_freq:08X})\n\n")
+        
+        for axis_name, axis_id in [("AZIMUTH (Axis 1)", '1'), ("ALTITUDE (Axis 2)", '2')]:
+            self.diag_text.insert('end', f"\n{'-'*60}\n")
+            self.diag_text.insert('end', f"{axis_name}\n")
+            self.diag_text.insert('end', f"{'-'*60}\n\n")
+            
+            # Version
+            version = self.protocol.get_motor_board_version(axis_id)
+            self.diag_text.insert('end', f"Motor Board Version: {version}\n")
+            
+            # CPR
+            cpr = self.protocol.get_counts_per_revolution(axis_id)
+            if cpr:
+                self.diag_text.insert('end', f"Counts Per Revolution: {cpr:,} (0x{cpr:08X})\n")
+                self.diag_text.insert('end', f"Resolution: {360.0/cpr:.8f} deg/count\n")
+                self.diag_text.insert('end', f"Arc-seconds per count: {(360.0*3600)/cpr:.4f}\"\n")
+            
+            # Position
+            pos = self.protocol.get_position(axis_id)
+            if pos is not None:
+                deg = self.protocol.counts_to_degrees(pos, axis_id)
+                self.diag_text.insert('end', f"\nCurrent Position: {pos:,} counts\n")
+                if deg is not None:
+                    self.diag_text.insert('end', f"Current Position: {deg:.6f}°\n")
+            
+            # Status
+            status = self.protocol.get_status(axis_id)
+            if status:
+                self.diag_text.insert('end', f"\nStatus (raw: 0x{status['raw']:02X}):\n")
+                self.diag_text.insert('end', f"  Running:     {status['running']}\n")
+                self.diag_text.insert('end', f"  Blocked:     {status['blocked']}\n")
+                self.diag_text.insert('end', f"  Initialized: {status['initialized']}\n")
+        
+        self.diag_text.configure(state='disabled')
+        self.log("System information queried")
+    
+    def toggle_auto_update(self):
+        """Toggle auto-update"""
+        if self.auto_update_var.get():
+            self.update_running = True
+            self.update_thread = threading.Thread(target=self.auto_update_loop, daemon=True)
+            self.update_thread.start()
+            self.log("Auto-update enabled")
+            self.db.set('display.auto_update', 'True')
+        else:
+            self.update_running = False
+            if self.update_thread:
+                self.update_thread.join(timeout=2)
+            self.log("Auto-update disabled")
+            self.db.set('display.auto_update', 'False')
+    
+    def auto_update_loop(self):
+        """Auto-update loop"""
+        while self.update_running and self.connected:
+            self.root.after(0, self.refresh_diagnostics)
+            time.sleep(1.0 / self.update_rate_var.get())
     
     def goto_home(self):
         """Go to home position"""
@@ -1240,9 +1655,9 @@ class TelescopeGUI:
             return
         
         home_az = self.protocol.degrees_to_counts(
-            self.config.get('positions', 'home_az'), self.protocol.AXIS_AZ)
+            self.db.get_float('positions.home_az'), self.protocol.AXIS_AZ)
         home_alt = self.protocol.degrees_to_counts(
-            self.config.get('positions', 'home_alt'), self.protocol.AXIS_ALT)
+            self.db.get_float('positions.home_alt'), self.protocol.AXIS_ALT)
         
         if home_az is not None and home_alt is not None:
             self.protocol.goto_position(self.protocol.AXIS_AZ, home_az)
@@ -1262,12 +1677,12 @@ class TelescopeGUI:
             az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
             alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
             
-            self.config.set('positions', 'home_az', az_deg)
-            self.config.set('positions', 'home_alt', alt_deg)
-            self.config.save()
-            
-            self.log(f"Set HOME: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
-            messagebox.showinfo("Home Set", f"Home position set to:\nAz: {az_deg:.2f}°\nAlt: {alt_deg:.2f}°")
+            if az_deg is not None and alt_deg is not None:
+                self.db.set('positions.home_az', str(az_deg))
+                self.db.set('positions.home_alt', str(alt_deg))
+                
+                self.log(f"Set HOME: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
+                messagebox.showinfo("Home Set", f"Home position set to:\nAz: {az_deg:.2f}°\nAlt: {alt_deg:.2f}°")
     
     def goto_stow(self):
         """Go to stow position"""
@@ -1276,9 +1691,9 @@ class TelescopeGUI:
             return
         
         stow_az = self.protocol.degrees_to_counts(
-            self.config.get('positions', 'stow_az'), self.protocol.AXIS_AZ)
+            self.db.get_float('positions.stow_az'), self.protocol.AXIS_AZ)
         stow_alt = self.protocol.degrees_to_counts(
-            self.config.get('positions', 'stow_alt'), self.protocol.AXIS_ALT)
+            self.db.get_float('positions.stow_alt'), self.protocol.AXIS_ALT)
         
         if stow_az is not None and stow_alt is not None:
             self.protocol.goto_position(self.protocol.AXIS_AZ, stow_az)
@@ -1298,12 +1713,12 @@ class TelescopeGUI:
             az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
             alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
             
-            self.config.set('positions', 'stow_az', az_deg)
-            self.config.set('positions', 'stow_alt', alt_deg)
-            self.config.save()
-            
-            self.log(f"Set STOW: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
-            messagebox.showinfo("Stow Set", f"Stow position set to:\nAz: {az_deg:.2f}°\nAlt: {alt_deg:.2f}°")
+            if az_deg is not None and alt_deg is not None:
+                self.db.set('positions.stow_az', str(az_deg))
+                self.db.set('positions.stow_alt', str(alt_deg))
+                
+                self.log(f"Set STOW: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
+                messagebox.showinfo("Stow Set", f"Stow position set to:\nAz: {az_deg:.2f}°\nAlt: {alt_deg:.2f}°")
     
     def zero_position(self):
         """Set current position to zero"""
@@ -1326,214 +1741,82 @@ class TelescopeGUI:
             self.protocol.initialization_done()
             self.log("Mount re-initialized")
     
-    def toggle_position_display(self):
-        """Toggle position display"""
-        self.config.set('display', 'show_positions', self.show_pos_var.get())
-        self.create_position_labels()
-    
-    def update_position_display(self):
-        """Update position display format"""
-        self.config.set('display', 'position_format', self.pos_format_var.get())
-        self.create_position_labels()
-    
-    def update_positions(self):
-        """Update position displays"""
-        if not self.connected or not self.show_pos_var.get():
-            return
-        
-        az_pos = self.protocol.get_position(self.protocol.AXIS_AZ)
-        alt_pos = self.protocol.get_position(self.protocol.AXIS_ALT)
-        
-        if az_pos is None or alt_pos is None:
-            return
-        
-        format_type = self.pos_format_var.get()
-        
-        if format_type == 'degrees':
-            az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
-            alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
-            
-            if az_deg is not None:
-                self.az_deg_label.configure(text=f"{az_deg:.4f}°")
-            if alt_deg is not None:
-                self.alt_deg_label.configure(text=f"{alt_deg:.4f}°")
-                
-        elif format_type == 'raw':
-            self.az_raw_label.configure(text=f"{az_pos:,} (0x{az_pos:08X})")
-            self.alt_raw_label.configure(text=f"{alt_pos:,} (0x{alt_pos:08X})")
-            
-        elif format_type == 'both':
-            az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
-            alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
-            
-            if az_deg is not None:
-                self.az_both_label.configure(text=f"{az_deg:.4f}° ({az_pos:,})")
-            if alt_deg is not None:
-                self.alt_both_label.configure(text=f"{alt_deg:.4f}° ({alt_pos:,})")
-                
-        elif format_type == 'coordinates':
-            az_deg = self.protocol.counts_to_degrees(az_pos, self.protocol.AXIS_AZ)
-            alt_deg = self.protocol.counts_to_degrees(alt_pos, self.protocol.AXIS_ALT)
-            
-            if az_deg is not None and alt_deg is not None:
-                # Normalize to 0-360
-                az_deg = az_deg % 360
-                coord_text = f"Az: {az_deg:.4f}°\nAlt: {alt_deg:.4f}°"
-                self.coord_label.configure(text=coord_text)
-    
-    def refresh_status(self):
-        """Refresh status display"""
-        if not self.connected:
-            return
-        
-        self.status_text.delete('1.0', 'end')
-        
-        # Get status for both axes
-        for axis_name, axis_id in [("AZIMUTH", '1'), ("ALTITUDE", '2')]:
-            self.status_text.insert('end', f"\n{'='*50}\n")
-            self.status_text.insert('end', f"{axis_name} AXIS\n")
-            self.status_text.insert('end', f"{'='*50}\n\n")
-            
-            # Position
-            pos = self.protocol.get_position(axis_id)
-            if pos is not None:
-                deg = self.protocol.counts_to_degrees(pos, axis_id)
-                self.status_text.insert('end', f"Position (counts): {pos:,} (0x{pos:08X})\n")
-                if deg is not None:
-                    self.status_text.insert('end', f"Position (degrees): {deg:.6f}°\n")
-            
-            # Status
-            status = self.protocol.get_status(axis_id)
-            if status:
-                self.status_text.insert('end', f"\nStatus:\n")
-                self.status_text.insert('end', f"  Running:     {status['running']}\n")
-                self.status_text.insert('end', f"  Initialized: {status['initialized']}\n")
-                self.status_text.insert('end', f"  Mode:        {'Tracking' if status['tracking_mode'] else 'Goto'}\n")
-                self.status_text.insert('end', f"  Direction:   {'CCW' if status['ccw'] else 'CW'}\n")
-                self.status_text.insert('end', f"  Speed:       {'Fast' if status['fast'] else 'Slow'}\n")
-                self.status_text.insert('end', f"  Blocked:     {status['blocked']}\n")
-        
-        # Update position displays
-        self.update_positions()
-    
-    def toggle_auto_update(self):
-        """Toggle auto-update"""
-        if self.auto_update_var.get():
-            self.update_running = True
-            self.update_thread = threading.Thread(target=self.auto_update_loop, daemon=True)
-            self.update_thread.start()
-            self.log("Auto-update enabled")
-            self.config.set('display', 'auto_update', True)
-        else:
-            self.update_running = False
-            if self.update_thread:
-                self.update_thread.join(timeout=2)
-            self.log("Auto-update disabled")
-            self.config.set('display', 'auto_update', False)
-    
-    def auto_update_loop(self):
-        """Auto-update loop"""
-        while self.update_running and self.connected:
-            self.root.after(0, self.refresh_status)
-            time.sleep(1.0 / self.update_rate_var.get())
-    
-    def query_system_info(self):
-        """Query system information"""
-        if not self.connected:
-            messagebox.showwarning("Not Connected", "Connect first")
-            return
-        
-        self.info_text.delete('1.0', 'end')
-        
-        for axis_name, axis_id in [("AZIMUTH", '1'), ("ALTITUDE", '2')]:
-            self.info_text.insert('end', f"\n{'='*60}\n")
-            self.info_text.insert('end', f"{axis_name} AXIS (ID: {axis_id})\n")
-            self.info_text.insert('end', f"{'='*60}\n\n")
-            
-            # Version
-            version = self.protocol.get_motor_board_version(axis_id)
-            self.info_text.insert('end', f"Motor Board Version: {version}\n")
-            
-            # CPR
-            cpr = self.protocol.get_counts_per_revolution(axis_id)
-            if cpr:
-                self.info_text.insert('end', f"Counts Per Revolution: {cpr:,} (0x{cpr:08X})\n")
-                self.info_text.insert('end', f"Resolution: {360.0/cpr:.8f} deg/count\n")
-                self.info_text.insert('end', f"Arc-seconds per count: {(360.0*3600)/cpr:.4f}\"\n")
-            
-            # Timer frequency (once)
-            if axis_id == '1':
-                timer_freq = self.protocol.get_timer_freq()
-                if timer_freq:
-                    self.info_text.insert('end', f"\nTimer Frequency: {timer_freq:,} Hz (0x{timer_freq:08X})\n")
-            
-            # Position
-            pos = self.protocol.get_position(axis_id)
-            if pos is not None:
-                deg = self.protocol.counts_to_degrees(pos, axis_id)
-                self.info_text.insert('end', f"\nCurrent Position: {pos:,} (0x{pos:08X})\n")
-                if deg is not None:
-                    self.info_text.insert('end', f"Current Position: {deg:.6f}°\n")
-            
-            # Status
-            status = self.protocol.get_status(axis_id)
-            if status:
-                self.info_text.insert('end', f"\nStatus:\n")
-                self.info_text.insert('end', f"  Running:     {status['running']}\n")
-                self.info_text.insert('end', f"  Initialized: {status['initialized']}\n")
-                self.info_text.insert('end', f"  Blocked:     {status['blocked']}\n")
-                self.info_text.insert('end', f"  Mode:        {'Tracking' if status['tracking_mode'] else 'Goto'}\n")
-        
-        self.log("System information queried")
-    
-    def adjust_speed(self, delta):
-        """Adjust speed by delta"""
-        new_speed = max(self.config.get('speed', 'min'),
-                       min(self.config.get('speed', 'max'),
-                           self.speed_var.get() + delta))
-        self.speed_var.set(new_speed)
-    
     def update_speed_label(self, *args):
         """Update speed label"""
         self.speed_label.configure(text=f"{self.speed_var.get():.2f}")
+        self.db.set('speed.default', str(self.speed_var.get()))
     
-    def save_keyboard_settings(self):
-        """Save keyboard settings"""
+    def save_control_settings(self):
+        """Save control settings"""
+        # Save control mode
+        self.db.set('controls.mode', self.control_mode_var.get())
+        
+        # Save key bindings
         for key, entry in self.key_entries.items():
-            self.config.set('controls', key, entry.get())
-        self.config.save()
+            self.db.set(f'controls.{key}', entry.get())
         
-        # Rebind
+        # Rebind controls
         self.bind_keyboard_controls()
+        self.setup_button_bindings()
         
-        messagebox.showinfo("Saved", "Keyboard settings saved!\nRestart recommended.")
-        self.log("Keyboard settings saved")
+        # Update mode label
+        control_mode = self.control_mode_var.get()
+        mode_text = "Mode: Latching (click to move)" if control_mode == 'latching' else "Mode: Momentary (hold to move)"
+        self.control_mode_label.configure(text=mode_text)
+        
+        messagebox.showinfo("Saved", "Control settings saved!")
+        self.log("Control settings saved")
     
-    def choose_color(self, theme_key):
+    def choose_theme_color(self, key):
         """Choose color for theme element"""
-        current = self.config.get('theme', theme_key)
-        color = colorchooser.askcolor(current)[1]
-        if color:
-            self.config.set('theme', theme_key, color)
+        current = self.theme_values[key].get()
+        color = colorchooser.askcolor(current, title=f"Choose {key} color")
+        if color[1]:
+            self.theme_values[key].set(color[1])
+            # Update swatch
+            self.theme_swatches[key].delete('all')
+            self.theme_swatches[key].create_rectangle(0, 0, 30, 20, fill=color[1], outline='gray')
+    
+    def preview_theme(self):
+        """Preview theme without saving"""
+        theme = {key: var.get() for key, var in self.theme_values.items()}
+        self.apply_theme(preview_theme=theme)
+        self.log("Theme preview applied (not saved)")
     
     def save_theme_settings(self):
-        """Save theme settings"""
-        self.config.save()
-        messagebox.showinfo("Saved", "Theme settings saved!\nRestart to apply.")
+        """Save and apply theme settings"""
+        for key, var in self.theme_values.items():
+            self.db.set(f'theme.{key}', var.get())
+        
+        self.apply_theme()
+        messagebox.showinfo("Saved", "Theme settings saved and applied!")
         self.log("Theme settings saved")
     
     def reset_theme(self):
         """Reset theme to default"""
-        self.config.config['theme'] = Config.DEFAULT_CONFIG['theme'].copy()
-        self.config.save()
-        messagebox.showinfo("Reset", "Theme reset to default!\nRestart to apply.")
+        defaults = {
+            'bg': '#2b2b2b',
+            'fg': '#ffffff',
+            'button_bg': '#3c3c3c',
+            'button_fg': '#ffffff',
+            'accent': '#4a9eff',
+            'estop': '#ff4444',
+        }
+        
+        for key, value in defaults.items():
+            self.db.set(f'theme.{key}', value)
+            self.theme_values[key].set(value)
+            self.theme_swatches[key].delete('all')
+            self.theme_swatches[key].create_rectangle(0, 0, 30, 20, fill=value, outline='gray')
+        
+        self.apply_theme()
+        messagebox.showinfo("Reset", "Theme reset to default!")
     
     def save_connection_settings(self):
         """Save connection settings"""
-        self.config.set('connection', 'ip', self.default_ip_entry.get())
-        self.config.set('connection', 'port', int(self.default_port_entry.get()))
-        self.config.set('connection', 'timeout', float(self.timeout_entry.get()))
-        self.config.save()
+        self.db.set('connection.ip', self.default_ip_entry.get())
+        self.db.set('connection.port', self.default_port_entry.get())
+        self.db.set('connection.timeout', self.timeout_entry.get())
         
         # Update main entries
         self.ip_entry.delete(0, 'end')
@@ -1548,6 +1831,7 @@ class TelescopeGUI:
         """Toggle debug logging mode."""
         enabled = self.debug_mode_var.get()
         self.file_logger.set_debug_mode(enabled)
+        self.db.set('logging.debug_mode', str(enabled))
         self.log(f"Debug mode {'enabled' if enabled else 'disabled'}")
     
     def open_log_folder(self):
@@ -1569,70 +1853,19 @@ class TelescopeGUI:
             self.log(f"Could not open folder: {e}")
             messagebox.showinfo("Log Folder", f"Log files are in:\n{folder}")
     
-    def on_status_update(self, axis: int, status: dict):
-        """Callback from StatusMonitor when status changes."""
-        # This runs in the monitor thread, so we need to use root.after
-        self.root.after(0, lambda: self._update_status_display(axis, status))
-    
-    def _update_status_display(self, axis: int, status: dict):
-        """Update the status indicator display (runs in main thread)."""
-        raw = status.get('raw', 0)
-        running = status.get('running', False)
-        blocked = status.get('blocked', False)
-        
-        # Determine indicator and color
-        if blocked:
-            indicator_text = "⚠ BLOCKED"
-            color = 'red'
-            # Log the blocked event
-            axis_name = "Azimuth" if axis == 1 else "Altitude"
-            self.log(f"⚠ {axis_name} BLOCKED detected! Status: {StatusDecoder.to_string(raw)}")
-            self.file_logger.log(f"BLOCKED detected on axis {axis}: {StatusDecoder.to_string(raw)}", level='WARNING')
-        elif running:
-            indicator_text = "● Moving"
-            color = 'blue'
-        else:
-            indicator_text = "● Stopped"
-            color = 'gray'
-        
-        # Update the appropriate indicator
-        raw_text = StatusDecoder.to_string(raw)
-        
-        if axis == 1:
-            self.az_status_indicator.configure(text=indicator_text, foreground=color)
-            self.az_status_raw.configure(text=raw_text)
-            
-            # Check for unexpected stop (was moving, now stopped, not blocked)
-            if self.axes_moving.get(1) and not running and not blocked:
-                self.log(f"⚠ Azimuth stopped WITHOUT blocked bit! Status: {raw_text}")
-                self.log("   → This suggests PTC fuse may have tripped")
-                self.file_logger.log(f"UNEXPECTED STOP on Azimuth (no blocked bit): {raw_text}", level='WARNING')
-                self.axes_moving[1] = False
-        else:
-            self.alt_status_indicator.configure(text=indicator_text, foreground=color)
-            self.alt_status_raw.configure(text=raw_text)
-            
-            if self.axes_moving.get(2) and not running and not blocked:
-                self.log(f"⚠ Altitude stopped WITHOUT blocked bit! Status: {raw_text}")
-                self.file_logger.log(f"UNEXPECTED STOP on Altitude (no blocked bit): {raw_text}", level='WARNING')
-                self.axes_moving[2] = False
-    
     def on_closing(self):
         """Handle window closing"""
         # Stop status monitor
         if self.status_monitor:
             self.status_monitor.stop()
         
+        # Stop update thread
+        self.update_running = False
+        
         if self.connected:
             self.stop_all()
             if self.protocol:
                 self.protocol.close()
-        
-        # Save current state
-        self.config.set('display', 'position_format', self.pos_format_var.get())
-        self.config.set('display', 'show_positions', self.show_pos_var.get())
-        self.config.set('speed', 'default', self.speed_var.get())
-        self.config.save()
         
         # Close file logger
         if self.file_logger:
