@@ -3,18 +3,29 @@
 Sky-Watcher Virtuoso GTi 150P Professional Controller
 Full-featured GUI with configurable settings, themes, and keyboard controls
 
-Version: 2.0 WORKING - Fixed for GTi 150P
-FIXED: 
+Version: 0.3.1 - Diagnostic Edition for Azimuth Motor Troubleshooting
+
+CHANGELOG v0.3.1:
+  - Added file logging with timestamped filenames (in parent directory)
+  - Added debug mode checkbox in Settings -> Logging tab
+  - Added continuous status monitoring (200ms polling) during motion
+  - Added real-time axis status indicators (Moving/Stopped/Blocked)
+  - Added Status byte decoder for human-readable diagnostics
+  - Fixed status bit definitions for proper blocked detection
+
+PREVIOUS FIXES (v0.3.0):
   - Removed X10 prefix (GTi doesn't support it)
   - Fixed :G command format (was :G{axis}{mode}{dir}, now :G{axis}{2-digit-code})
   - Added :F1 and :F2 initialization (CRITICAL - mount won't move without this!)
-  - Comprehensive logging to debug issues
 
 Works with GTi 150P firmware that uses simple protocol without X10 prefix.
 
-LOGGING: Every command sent/received is logged with timestamps
-         Check the "Mount Info" tab -> "Command Log" section to see all activity
+DIAGNOSTIC FOCUS: Watching for Blocked bit (0x02) when azimuth motor stops
+  - If Blocked bit gets set: Motor controller detected obstruction
+  - If motion stops WITHOUT Blocked bit: PTC fuse likely tripped first
 """
+
+VERSION = "0.3.1"
 
 import socket
 import time
@@ -31,6 +42,185 @@ try:
 except ImportError:
     print("Error: tkinter not available. Install with: sudo apt-get install python3-tk")
     sys.exit(1)
+
+
+# Status byte bit definitions (from SynScan protocol)
+STATUS_RUNNING = 0x01      # Bit 0: Motor is running
+STATUS_BLOCKED = 0x02      # Bit 1: Motor blocked/stalled  
+STATUS_INIT = 0x04         # Bit 2: Axis initialized
+
+
+class FileLogger:
+    """Handles file logging with debug mode support."""
+    
+    def __init__(self, log_dir: Path):
+        self.log_dir = log_dir
+        self.log_file = None
+        self.log_path = None
+        self.debug_mode = False
+        self._lock = threading.Lock()
+        self._start_new_log()
+    
+    def _start_new_log(self):
+        """Create a new log file with timestamp."""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"telescope_control_{timestamp}.log"
+        self.log_path = self.log_dir / filename
+        try:
+            self.log_file = open(self.log_path, 'w', encoding='utf-8')
+            self._write_header()
+        except Exception as e:
+            print(f"Warning: Could not create log file: {e}")
+            self.log_file = None
+    
+    def _write_header(self):
+        """Write log file header."""
+        if not self.log_file:
+            return
+        self.log_file.write(f"Telescope Control Log - v{VERSION}\n")
+        self.log_file.write(f"Started: {datetime.now().isoformat()}\n")
+        self.log_file.write(f"Debug Mode: {self.debug_mode}\n")
+        self.log_file.write("=" * 60 + "\n\n")
+        self.log_file.flush()
+    
+    def set_debug_mode(self, enabled: bool):
+        """Enable or disable debug mode."""
+        self.debug_mode = enabled
+        self.log(f"Debug mode {'enabled' if enabled else 'disabled'}", level='INFO')
+    
+    def log(self, message: str, level: str = 'INFO'):
+        """
+        Log a message to file.
+        
+        Levels:
+        - DEBUG: Only logged if debug mode is on
+        - INFO: Always logged
+        - WARNING: Always logged
+        - ERROR: Always logged
+        - STATUS: State changes, always logged
+        """
+        if level == 'DEBUG' and not self.debug_mode:
+            return
+        
+        if not self.log_file:
+            return
+            
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        with self._lock:
+            try:
+                line = f"[{timestamp}] [{level:7}] {message}\n"
+                self.log_file.write(line)
+                self.log_file.flush()
+            except Exception:
+                pass
+    
+    def log_command(self, cmd: str, response: str):
+        """Log a command/response pair (debug level)."""
+        cmd_display = repr(cmd).replace('\r', '\\r')
+        resp_display = repr(response).replace('\r', '\\r') if response else "None"
+        self.log(f"CMD: {cmd_display} -> {resp_display}", level='DEBUG')
+    
+    def log_status_change(self, axis: int, old_status: int, new_status: int, decoded: str):
+        """Log a status change (always logged)."""
+        axis_name = "Azimuth" if axis == 1 else "Altitude"
+        self.log(f"{axis_name} status: 0x{old_status:02X} -> 0x{new_status:02X} ({decoded})", level='STATUS')
+    
+    def close(self):
+        """Close the log file."""
+        if self.log_file:
+            self.log(f"Log closed: {datetime.now().isoformat()}", level='INFO')
+            try:
+                self.log_file.close()
+            except Exception:
+                pass
+
+
+class StatusDecoder:
+    """Decodes SynScan status bytes into human-readable format."""
+    
+    @staticmethod
+    def decode(status_byte: int) -> dict:
+        """Decode a status byte into components."""
+        return {
+            'running': bool(status_byte & STATUS_RUNNING),
+            'blocked': bool(status_byte & STATUS_BLOCKED),
+            'initialized': bool(status_byte & STATUS_INIT),
+            'raw': status_byte
+        }
+    
+    @staticmethod
+    def to_string(status_byte: int) -> str:
+        """Convert status byte to human-readable string."""
+        d = StatusDecoder.decode(status_byte)
+        parts = []
+        if d['running']:
+            parts.append("Running")
+        else:
+            parts.append("Stopped")
+        if d['blocked']:
+            parts.append("BLOCKED")
+        if d['initialized']:
+            parts.append("Init")
+        return f"0x{status_byte:02X} ({', '.join(parts)})"
+
+
+class StatusMonitor:
+    """Monitors axis status during motion with 200ms polling."""
+    
+    def __init__(self, protocol, file_logger, gui_callback=None):
+        self.protocol = protocol
+        self.file_logger = file_logger
+        self.gui_callback = gui_callback
+        self.monitoring = False
+        self._thread = None
+        self._last_status = {1: None, 2: None}
+    
+    def start(self):
+        """Start monitoring."""
+        if self.monitoring:
+            return
+        self.monitoring = True
+        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._thread.start()
+        if self.file_logger:
+            self.file_logger.log("Status monitoring started (200ms polling)", level='INFO')
+    
+    def stop(self):
+        """Stop monitoring."""
+        self.monitoring = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+        if self.file_logger:
+            self.file_logger.log("Status monitoring stopped", level='INFO')
+    
+    def _monitor_loop(self):
+        """Main monitoring loop - polls every 200ms."""
+        while self.monitoring:
+            if self.protocol:
+                for axis in [1, 2]:
+                    try:
+                        status = self.protocol.get_status(str(axis))
+                        if status:
+                            raw = status.get('raw', 0)
+                            old = self._last_status.get(axis)
+                            
+                            # Check for status change
+                            if old is not None and raw != old:
+                                decoded = StatusDecoder.to_string(raw)
+                                if self.file_logger:
+                                    self.file_logger.log_status_change(axis, old, raw, decoded)
+                            
+                            self._last_status[axis] = raw
+                            
+                            # Callback to GUI
+                            if self.gui_callback:
+                                try:
+                                    self.gui_callback(axis, status)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            time.sleep(0.2)  # 200ms polling interval
 
 
 class Config:
@@ -304,7 +494,7 @@ class SkyWatcherProtocol:
         return freq
     
     def get_status(self, axis):
-        """Get motor status"""
+        """Get motor status with proper bit decoding."""
         cmd = f":f{axis}"
         response = self.send_command(cmd)
         if not response or not response.startswith('='):
@@ -313,14 +503,14 @@ class SkyWatcherProtocol:
         status_hex = response[1:3]
         try:
             status = int(status_hex, 16)
+            # Proper bit definitions per SynScan protocol:
+            # Bit 0 (0x01): Running - motor is currently moving
+            # Bit 1 (0x02): Blocked - motor stalled/obstructed (CRITICAL FOR DIAGNOSTICS)
+            # Bit 2 (0x04): Initialized - axis has been initialized
             return {
                 'running': bool(status & 0x01),
                 'blocked': bool(status & 0x02),
                 'initialized': bool(status & 0x04),
-                'tracking_mode': bool(status & 0x01),
-                'goto_mode': not bool(status & 0x01),
-                'ccw': bool(status & 0x02),
-                'fast': bool(status & 0x04),
                 'raw': status
             }
         except ValueError:
@@ -440,15 +630,30 @@ class TelescopeGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("SkyWatcher Controller v2.0")
-        self.root.geometry("1000x750")
+        self.root.title(f"SkyWatcher Controller v{VERSION}")
+        self.root.geometry("1000x800")
         
         # Configuration
         self.config = Config()
         
+        # Determine log directory (parent of script location)
+        script_path = Path(__file__).resolve()
+        self.log_dir = script_path.parent
+        
+        # Initialize file logger
+        self.file_logger = FileLogger(self.log_dir)
+        self.file_logger.log(f"Application started", level='INFO')
+        self.file_logger.log(f"Log directory: {self.log_dir}", level='INFO')
+        
         # Protocol instance
         self.protocol = None
         self.connected = False
+        
+        # Status monitor
+        self.status_monitor = None
+        
+        # Track which axes are moving (for detecting unexpected stops)
+        self.axes_moving = {1: False, 2: False}
         
         # Position update thread
         self.update_thread = None
@@ -555,6 +760,22 @@ class TelescopeGUI:
         # Keyboard hints
         hint_text = f"Keyboard: {self.config.get('controls', 'up').upper()}/{self.config.get('controls', 'down').upper()}/{self.config.get('controls', 'left').upper()}/{self.config.get('controls', 'right').upper()}, SPACE=Stop, ESC=E-Stop"
         ttk.Label(dir_frame, text=hint_text, font=('Arial', 8)).grid(row=5, column=0, columnspan=3, pady=5)
+        
+        # Axis status indicators (for diagnostic monitoring)
+        indicator_frame = ttk.LabelFrame(dir_frame, text="Axis Status (Live)")
+        indicator_frame.grid(row=6, column=0, columnspan=3, sticky='ew', pady=10, padx=5)
+        
+        ttk.Label(indicator_frame, text="Azimuth:").grid(row=0, column=0, padx=5, pady=2, sticky='e')
+        self.az_status_indicator = ttk.Label(indicator_frame, text="● Unknown", foreground='gray', font=('Arial', 10))
+        self.az_status_indicator.grid(row=0, column=1, padx=5, pady=2, sticky='w')
+        self.az_status_raw = ttk.Label(indicator_frame, text="", font=('Courier', 8))
+        self.az_status_raw.grid(row=0, column=2, padx=5, pady=2, sticky='w')
+        
+        ttk.Label(indicator_frame, text="Altitude:").grid(row=1, column=0, padx=5, pady=2, sticky='e')
+        self.alt_status_indicator = ttk.Label(indicator_frame, text="● Unknown", foreground='gray', font=('Arial', 10))
+        self.alt_status_indicator.grid(row=1, column=1, padx=5, pady=2, sticky='w')
+        self.alt_status_raw = ttk.Label(indicator_frame, text="", font=('Courier', 8))
+        self.alt_status_raw.grid(row=1, column=2, padx=5, pady=2, sticky='w')
         
         # Center frame - Preset positions
         preset_frame = ttk.LabelFrame(control_tab, text="Preset Positions", padding=10)
@@ -733,6 +954,47 @@ class TelescopeGUI:
         ttk.Button(conn_settings_frame, text="Save Connection Settings", 
                   command=self.save_connection_settings).pack(pady=10)
         
+        # Logging settings
+        logging_frame = ttk.Frame(settings_notebook)
+        settings_notebook.add(logging_frame, text="Logging")
+        
+        ttk.Label(logging_frame, text="Logging Configuration", 
+                 font=('Arial', 12, 'bold')).pack(pady=10)
+        
+        # Debug mode checkbox
+        self.debug_mode_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(logging_frame, text="Debug Mode (log all commands/responses)", 
+                       variable=self.debug_mode_var,
+                       command=self.toggle_debug_mode).pack(anchor='w', padx=20, pady=5)
+        
+        ttk.Label(logging_frame, text="When enabled, every command sent and response received\n"
+                 "will be recorded in the log file for detailed analysis.",
+                 font=('Arial', 9), foreground='gray').pack(anchor='w', padx=40, pady=5)
+        
+        # Log file location
+        ttk.Separator(logging_frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
+        
+        ttk.Label(logging_frame, text="Log File Location:", font=('Arial', 10, 'bold')).pack(anchor='w', padx=20, pady=5)
+        
+        log_path_text = str(self.file_logger.log_path) if self.file_logger.log_path else "Not created"
+        self.log_path_label = ttk.Label(logging_frame, text=log_path_text, font=('Courier', 9))
+        self.log_path_label.pack(anchor='w', padx=40, pady=5)
+        
+        ttk.Button(logging_frame, text="Open Log Folder", 
+                  command=self.open_log_folder).pack(anchor='w', padx=20, pady=10)
+        
+        # Status monitoring info
+        ttk.Separator(logging_frame, orient='horizontal').pack(fill='x', padx=20, pady=10)
+        
+        ttk.Label(logging_frame, text="Status Monitoring:", font=('Arial', 10, 'bold')).pack(anchor='w', padx=20, pady=5)
+        ttk.Label(logging_frame, text="Status polling interval: 200ms\n"
+                 "Watching for: Running bit (0x01), Blocked bit (0x02), Init bit (0x04)\n\n"
+                 "If azimuth stops and Blocked bit (0x02) is set:\n"
+                 "  → Motor controller detected obstruction\n\n"
+                 "If azimuth stops WITHOUT Blocked bit:\n"
+                 "  → PTC fuse likely tripped before controller knew",
+                 font=('Arial', 9), justify='left').pack(anchor='w', padx=40, pady=5)
+        
     def create_info_tab(self):
         """Create info tab"""
         info_tab = ttk.Frame(self.notebook)
@@ -837,6 +1099,12 @@ class TelescopeGUI:
             self.connect_btn.configure(text="Connect")
             self.status_label.configure(text="Disconnected", foreground="red")
             self.log("Disconnected")
+            self.file_logger.log("Disconnected from mount", level='INFO')
+            
+            # Stop status monitor
+            if self.status_monitor:
+                self.status_monitor.stop()
+                self.status_monitor = None
             
             if self.auto_update_var.get():
                 self.auto_update_var.set(False)
@@ -847,6 +1115,7 @@ class TelescopeGUI:
             timeout = self.config.get('connection', 'timeout')
             
             self.log(f"Connecting to {ip}:{port} with timeout={timeout}s...")
+            self.file_logger.log(f"Attempting connection to {ip}:{port}", level='INFO')
             self.protocol = SkyWatcherProtocol(ip, port, timeout, log_callback=self.log)
             
             try:
@@ -857,6 +1126,7 @@ class TelescopeGUI:
                     self.status_label.configure(text="Connected", foreground="green")
                     self.log(f"✓ Connected to {ip}:{port}")
                     self.log(f"Motor board version: {version}")
+                    self.file_logger.log(f"Connected successfully. Version: {version}", level='INFO')
                     
                     self.log("Initializing axes...")
                     # CRITICAL: Initialize both axes before they will move!
@@ -886,15 +1156,22 @@ class TelescopeGUI:
                     if timer_freq:
                         self.log(f"Timer Frequency: {timer_freq:,} Hz")
                     
+                    # Start status monitor for diagnostic polling
+                    self.status_monitor = StatusMonitor(self.protocol, self.file_logger, self.on_status_update)
+                    self.status_monitor.start()
+                    self.log("✓ Status monitor started (200ms polling)")
+                    
                     self.log("✓ Mount ready! Press W/A/S/D or use buttons to move.")
                 else:
                     self.log("✗ Failed to get version from mount")
+                    self.file_logger.log("Connection failed: no version response", level='ERROR')
                     messagebox.showerror("Connection Error", 
                                        "Could not connect to telescope.")
                     self.protocol.close()
                     self.protocol = None
             except Exception as e:
                 self.log(f"✗ Connection error: {e}")
+                self.file_logger.log(f"Connection error: {e}", level='ERROR')
                 messagebox.showerror("Connection Error", str(e))
                 if self.protocol:
                     self.protocol.close()
@@ -912,14 +1189,19 @@ class TelescopeGUI:
         
         speed = self.speed_var.get()
         self.log(f"=== MOVE {direction.upper()} requested at {speed:.2f}°/sec ===")
+        self.file_logger.log(f"Move {direction} at {speed:.2f}°/sec", level='INFO')
         
         if direction == 'up':
+            self.axes_moving[2] = True
             self.protocol.slew_fixed_rate(self.protocol.AXIS_ALT, True, speed)
         elif direction == 'down':
+            self.axes_moving[2] = True
             self.protocol.slew_fixed_rate(self.protocol.AXIS_ALT, False, speed)
         elif direction == 'left':
+            self.axes_moving[1] = True
             self.protocol.slew_fixed_rate(self.protocol.AXIS_AZ, False, speed)
         elif direction == 'right':
+            self.axes_moving[1] = True
             self.protocol.slew_fixed_rate(self.protocol.AXIS_AZ, True, speed)
     
     def stop_all(self):
@@ -929,8 +1211,10 @@ class TelescopeGUI:
             return
         
         self.log("=== STOP ALL requested ===")
+        self.file_logger.log("Stop all motion", level='INFO')
         self.protocol.stop_motion(self.protocol.AXIS_AZ)
         self.protocol.stop_motion(self.protocol.AXIS_ALT)
+        self.axes_moving = {1: False, 2: False}
         self.estop_active = False
         self.estop_btn.configure(text="🛑 EMERGENCY STOP")
         self.log("✓ All axes stopped, E-Stop cleared")
@@ -941,10 +1225,12 @@ class TelescopeGUI:
             return
         
         self.estop_active = True
+        self.axes_moving = {1: False, 2: False}
         self.protocol.instant_stop(self.protocol.AXIS_AZ)
         self.protocol.instant_stop(self.protocol.AXIS_ALT)
         self.estop_btn.configure(text="⚠️ E-STOP ACTIVE - Click STOP to Clear")
         self.log("⚠️ EMERGENCY STOP ACTIVATED")
+        self.file_logger.log("EMERGENCY STOP activated", level='WARNING')
         messagebox.showwarning("Emergency Stop", "Emergency stop activated!\nClick STOP button to clear.")
     
     def goto_home(self):
@@ -1258,8 +1544,85 @@ class TelescopeGUI:
         messagebox.showinfo("Saved", "Connection settings saved!")
         self.log("Connection settings saved")
     
+    def toggle_debug_mode(self):
+        """Toggle debug logging mode."""
+        enabled = self.debug_mode_var.get()
+        self.file_logger.set_debug_mode(enabled)
+        self.log(f"Debug mode {'enabled' if enabled else 'disabled'}")
+    
+    def open_log_folder(self):
+        """Open the log folder in file manager."""
+        import subprocess
+        import platform
+        
+        folder = str(self.log_dir)
+        system = platform.system()
+        
+        try:
+            if system == 'Windows':
+                subprocess.run(['explorer', folder])
+            elif system == 'Darwin':
+                subprocess.run(['open', folder])
+            else:  # Linux
+                subprocess.run(['xdg-open', folder])
+        except Exception as e:
+            self.log(f"Could not open folder: {e}")
+            messagebox.showinfo("Log Folder", f"Log files are in:\n{folder}")
+    
+    def on_status_update(self, axis: int, status: dict):
+        """Callback from StatusMonitor when status changes."""
+        # This runs in the monitor thread, so we need to use root.after
+        self.root.after(0, lambda: self._update_status_display(axis, status))
+    
+    def _update_status_display(self, axis: int, status: dict):
+        """Update the status indicator display (runs in main thread)."""
+        raw = status.get('raw', 0)
+        running = status.get('running', False)
+        blocked = status.get('blocked', False)
+        
+        # Determine indicator and color
+        if blocked:
+            indicator_text = "⚠ BLOCKED"
+            color = 'red'
+            # Log the blocked event
+            axis_name = "Azimuth" if axis == 1 else "Altitude"
+            self.log(f"⚠ {axis_name} BLOCKED detected! Status: {StatusDecoder.to_string(raw)}")
+            self.file_logger.log(f"BLOCKED detected on axis {axis}: {StatusDecoder.to_string(raw)}", level='WARNING')
+        elif running:
+            indicator_text = "● Moving"
+            color = 'blue'
+        else:
+            indicator_text = "● Stopped"
+            color = 'gray'
+        
+        # Update the appropriate indicator
+        raw_text = StatusDecoder.to_string(raw)
+        
+        if axis == 1:
+            self.az_status_indicator.configure(text=indicator_text, foreground=color)
+            self.az_status_raw.configure(text=raw_text)
+            
+            # Check for unexpected stop (was moving, now stopped, not blocked)
+            if self.axes_moving.get(1) and not running and not blocked:
+                self.log(f"⚠ Azimuth stopped WITHOUT blocked bit! Status: {raw_text}")
+                self.log("   → This suggests PTC fuse may have tripped")
+                self.file_logger.log(f"UNEXPECTED STOP on Azimuth (no blocked bit): {raw_text}", level='WARNING')
+                self.axes_moving[1] = False
+        else:
+            self.alt_status_indicator.configure(text=indicator_text, foreground=color)
+            self.alt_status_raw.configure(text=raw_text)
+            
+            if self.axes_moving.get(2) and not running and not blocked:
+                self.log(f"⚠ Altitude stopped WITHOUT blocked bit! Status: {raw_text}")
+                self.file_logger.log(f"UNEXPECTED STOP on Altitude (no blocked bit): {raw_text}", level='WARNING')
+                self.axes_moving[2] = False
+    
     def on_closing(self):
         """Handle window closing"""
+        # Stop status monitor
+        if self.status_monitor:
+            self.status_monitor.stop()
+        
         if self.connected:
             self.stop_all()
             if self.protocol:
@@ -1270,6 +1633,10 @@ class TelescopeGUI:
         self.config.set('display', 'show_positions', self.show_pos_var.get())
         self.config.set('speed', 'default', self.speed_var.get())
         self.config.save()
+        
+        # Close file logger
+        if self.file_logger:
+            self.file_logger.close()
         
         self.root.destroy()
 
