@@ -3,9 +3,14 @@
 Sky-Watcher Virtuoso GTi 150P Professional Controller
 Full-featured GUI with configurable settings, themes, and keyboard controls
 
-Version: 2.0 FIXED with COMPREHENSIVE LOGGING
-FIXED: All commands now use simple protocol format (no X10 prefix)
-       Works with older firmware / GTi 150P mounts that return !3 error for X10 commands
+Version: 2.0 WORKING - Fixed for GTi 150P
+FIXED: 
+  - Removed X10 prefix (GTi doesn't support it)
+  - Fixed :G command format (was :G{axis}{mode}{dir}, now :G{axis}{2-digit-code})
+  - Added :F1 and :F2 initialization (CRITICAL - mount won't move without this!)
+  - Comprehensive logging to debug issues
+
+Works with GTi 150P firmware that uses simple protocol without X10 prefix.
 
 LOGGING: Every command sent/received is logged with timestamps
          Check the "Mount Info" tab -> "Command Log" section to see all activity
@@ -200,29 +205,31 @@ class SkyWatcherProtocol:
         return response and response.startswith('=')
     
     def set_motion_mode(self, axis, goto_mode=False, direction_cw=True, high_speed=False):
-        """Set motion mode"""
-        mode_byte = 0
-        if not goto_mode:
-            mode_byte |= 0x01
-        if not direction_cw:
-            mode_byte |= 0x02
-        if high_speed and not goto_mode:
-            mode_byte |= 0x04
-        elif not high_speed and goto_mode:
-            mode_byte |= 0x04
+        """Set motion mode - FIXED FORMAT"""
+        # Mode codes (2 hex digits):
+        # 00 = High-speed GOTO, CW
+        # 01 = High-speed GOTO, CCW  
+        # 10 = Low-speed tracking/slew, CW
+        # 11 = Low-speed tracking/slew, CCW
+        # 20 = Low-speed GOTO, CW
+        # 30 = High-speed slewing, CW
         
-        mode_hex = f"{mode_byte:02X}"
-        direction_byte = 0
-        if not direction_cw:
-            direction_byte |= 0x01
-        dir_hex = f"{direction_byte:02X}"
+        if goto_mode:
+            if high_speed:
+                mode_code = "00" if direction_cw else "01"
+            else:
+                mode_code = "20" if direction_cw else "21"  
+        else:
+            # Tracking/slew mode
+            mode_code = "10" if direction_cw else "11"
         
         if self.log_callback:
             mode_desc = "GOTO" if goto_mode else "TRACKING"
+            speed_desc = "HIGH" if high_speed else "LOW"
             dir_desc = "CW" if direction_cw else "CCW"
-            self.log_callback(f"  Set motion mode: {mode_desc}, {dir_desc}, mode_byte=0x{mode_hex}")
+            self.log_callback(f"  Set motion mode: {mode_desc}, {speed_desc}, {dir_desc}, code={mode_code}")
         
-        cmd = f":G{axis}{mode_hex}{dir_hex}"
+        cmd = f":G{axis}{mode_code}"
         response = self.send_command(cmd)
         return response and response.startswith('=')
     
@@ -851,10 +858,22 @@ class TelescopeGUI:
                     self.log(f"✓ Connected to {ip}:{port}")
                     self.log(f"Motor board version: {version}")
                     
-                    self.log("Initializing mount...")
-                    self.protocol.initialization_done()
+                    self.log("Initializing axes...")
+                    # CRITICAL: Initialize both axes before they will move!
+                    init1 = self.protocol.send_command(":F1")
+                    init2 = self.protocol.send_command(":F2")
                     
-                    # Cache parameters
+                    if init1 and init1.startswith('='):
+                        self.log("✓ Axis 1 (Azimuth) initialized")
+                    else:
+                        self.log(f"⚠ Axis 1 init: {repr(init1)}")
+                    
+                    if init2 and init2.startswith('='):
+                        self.log("✓ Axis 2 (Altitude) initialized")
+                    else:
+                        self.log(f"⚠ Axis 2 init: {repr(init2)}")
+                    
+                    # Query parameters
                     self.log("Querying mount parameters...")
                     cpr_az = self.protocol.get_counts_per_revolution(self.protocol.AXIS_AZ)
                     cpr_alt = self.protocol.get_counts_per_revolution(self.protocol.AXIS_ALT)
@@ -867,7 +886,7 @@ class TelescopeGUI:
                     if timer_freq:
                         self.log(f"Timer Frequency: {timer_freq:,} Hz")
                     
-                    self.log("Ready! Press W/A/S/D or use buttons to move.")
+                    self.log("✓ Mount ready! Press W/A/S/D or use buttons to move.")
                 else:
                     self.log("✗ Failed to get version from mount")
                     messagebox.showerror("Connection Error", 
