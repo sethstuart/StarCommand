@@ -234,7 +234,13 @@ class FileLogger:
         self.debug_mode = False
         self.retention = retention
         self._lock = threading.Lock()
-        
+
+        # Async logging with queue to avoid blocking
+        from queue import Queue
+        self.log_queue = Queue(maxsize=1000)
+        self.log_thread = threading.Thread(target=self._log_worker, daemon=True, name="LogWorker")
+        self.log_thread.start()
+
         self._cleanup_old_logs()
         self._start_new_log()
     
@@ -279,19 +285,35 @@ class FileLogger:
     
     def set_debug_mode(self, enabled: bool):
         self.debug_mode = enabled
-    
+
+    def _log_worker(self):
+        """Background thread that writes log entries from queue."""
+        from queue import Empty
+        while True:
+            try:
+                timestamp, level, message = self.log_queue.get(timeout=1)
+                if self.log_file:
+                    try:
+                        self.log_file.write(f"[{timestamp}] [{level:7}] {message}\n")
+                        self.log_file.flush()
+                    except Exception:
+                        pass
+            except Empty:
+                continue
+            except Exception:
+                break
+
     def log(self, message: str, level: str = 'INFO'):
+        """Queue log entry for async writing (non-blocking)."""
         if level == 'DEBUG' and not self.debug_mode:
             return
         if not self.log_file:
             return
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        with self._lock:
-            try:
-                self.log_file.write(f"[{timestamp}] [{level:7}] {message}\n")
-                self.log_file.flush()
-            except Exception:
-                pass
+        try:
+            self.log_queue.put_nowait((timestamp, level, message))
+        except:
+            pass  # Drop log if queue full (avoid blocking)
     
     def close(self):
         if self.log_file:
@@ -438,6 +460,161 @@ class StatusMonitor:
                     except Exception:
                         pass
             time.sleep(0.2)
+
+
+class GotoTracker:
+    """Tracks goto operations and verifies completion."""
+
+    def __init__(self, protocol, file_logger, completion_callback=None):
+        self.protocol = protocol
+        self.file_logger = file_logger
+        self.completion_callback = completion_callback
+
+        self.active_gotos = {}  # {axis: {target, start_time, start_pos}}
+        self.tolerance_deg = 0.5  # Within 0.5° = success
+        self.timeout_sec = 120  # 2 minutes max
+        self.check_interval_ms = 500  # Check every 0.5s
+
+        self._check_job = None
+
+    def start_goto(self, axis, target_counts):
+        """Register a goto operation and start tracking."""
+        current = self.protocol.get_position(axis, log_to_ui=False)
+        self.active_gotos[axis] = {
+            'target': target_counts,
+            'start_time': time.time(),
+            'start_pos': current
+        }
+
+        # Start checking if not already running
+        if self._check_job is None:
+            self._start_checking()
+
+    def _start_checking(self):
+        """Start periodic verification."""
+        self._check_gotos()
+
+    def _check_gotos(self):
+        """Periodic check of all active gotos."""
+        if not self.active_gotos:
+            self._check_job = None
+            return
+
+        for axis in list(self.active_gotos.keys()):
+            goto_info = self.active_gotos[axis]
+
+            # Get current status
+            status = self.protocol.get_status(axis, log_to_ui=False)
+            current_pos = self.protocol.get_position(axis, log_to_ui=False)
+
+            if status is None or current_pos is None:
+                continue
+
+            # Check timeout
+            elapsed = time.time() - goto_info['start_time']
+            if elapsed > self.timeout_sec:
+                self._handle_timeout(axis, goto_info)
+                continue
+
+            # Check if still moving
+            if status.get('running', False):
+                continue  # Still in progress
+
+            # Stopped - check if at target
+            target_deg = self.protocol.counts_to_degrees(goto_info['target'], axis)
+            current_deg = self.protocol.counts_to_degrees(current_pos, axis)
+
+            if target_deg is None or current_deg is None:
+                continue
+
+            # Calculate error
+            error = abs(current_deg - target_deg)
+            # Handle wrap-around for azimuth
+            if axis == '1' or axis == 1:
+                error = min(error, abs(error - 360), abs(error + 360))
+
+            if error <= self.tolerance_deg:
+                self._handle_success(axis, goto_info, current_deg)
+            elif status.get('blocked', False):
+                self._handle_blocked(axis, goto_info, current_deg)
+            else:
+                self._handle_failure(axis, goto_info, current_deg, error)
+
+        # Continue checking if any gotos remain
+        if self.active_gotos:
+            self._check_job = threading.Timer(self.check_interval_ms / 1000.0,
+                                            self._check_gotos)
+            self._check_job.daemon = True
+            self._check_job.start()
+        else:
+            self._check_job = None
+
+    def _handle_success(self, axis, goto_info, final_pos):
+        """Handle successful completion."""
+        elapsed = time.time() - goto_info['start_time']
+        self.file_logger.log(
+            f"Goto complete: Axis {axis} reached target "
+            f"{final_pos:.2f}° in {elapsed:.1f}s",
+            level='INFO'
+        )
+        del self.active_gotos[axis]
+
+        if self.completion_callback:
+            self.completion_callback(axis, 'success', final_pos)
+
+    def _handle_blocked(self, axis, goto_info, final_pos):
+        """Handle blocked condition."""
+        target_deg = self.protocol.counts_to_degrees(goto_info['target'], axis)
+        self.file_logger.log(
+            f"Goto blocked: Axis {axis} stopped at {final_pos:.2f}°, "
+            f"target was {target_deg:.2f}°",
+            level='WARNING'
+        )
+        del self.active_gotos[axis]
+
+        if self.completion_callback:
+            self.completion_callback(axis, 'blocked', final_pos)
+
+    def _handle_failure(self, axis, goto_info, final_pos, error):
+        """Handle failure (stopped but not at target)."""
+        target_deg = self.protocol.counts_to_degrees(goto_info['target'], axis)
+        self.file_logger.log(
+            f"Goto failed: Axis {axis} stopped at {final_pos:.2f}°, "
+            f"target was {target_deg:.2f}° "
+            f"(error: {error:.2f}°)",
+            level='WARNING'
+        )
+        del self.active_gotos[axis]
+
+        if self.completion_callback:
+            self.completion_callback(axis, 'failed', final_pos)
+
+    def _handle_timeout(self, axis, goto_info):
+        """Handle timeout."""
+        self.file_logger.log(
+            f"Goto timeout: Axis {axis} did not reach target within {self.timeout_sec}s",
+            level='ERROR'
+        )
+        # Stop the motion
+        self.protocol.stop_motion(axis)
+        del self.active_gotos[axis]
+
+        if self.completion_callback:
+            self.completion_callback(axis, 'timeout', None)
+
+    def cancel(self, axis=None):
+        """Cancel tracking for axis (or all if None)."""
+        if axis is None:
+            self.active_gotos.clear()
+        elif axis in self.active_gotos:
+            del self.active_gotos[axis]
+
+    def stop(self):
+        """Stop all tracking."""
+        if self._check_job:
+            self._check_job.cancel()
+            self._check_job = None
+        self.active_gotos.clear()
 
 
 class SkyWatcherProtocol:
@@ -630,20 +807,38 @@ class SkyWatcherProtocol:
         return self.start_motion(axis)
     
     def goto_position(self, axis, target_position):
-        """Goto specific position."""
+        """Goto specific position with shortest path calculation."""
         current = self.get_position(axis)
         if current is None:
             return False
-        
-        direction_cw = target_position > current
+
+        # Convert to degrees for wrap-around calculation (only for azimuth)
+        current_deg = self.counts_to_degrees(current, axis)
+        target_deg = self.counts_to_degrees(target_position, axis)
+
+        if current_deg is None or target_deg is None or axis == self.AXIS_ALT or axis == '2':
+            # Fallback to old logic if conversion fails or for altitude axis
+            direction_cw = target_position > current
+        else:
+            # Normalize to 0-360 range for azimuth
+            current_deg = current_deg % 360
+            target_deg = target_deg % 360
+
+            # Calculate both directions
+            cw_distance = (target_deg - current_deg) % 360
+            ccw_distance = (current_deg - target_deg) % 360
+
+            # Choose shorter path (CW wins on tie)
+            direction_cw = cw_distance <= ccw_distance
+
         if not self.set_motion_mode(axis, goto_mode=True, direction_cw=direction_cw):
             return False
-        
+
         hex_target = self.format_hex_data(target_position + 0x800000, 3)
         response = self.send_command(f":S{axis}{hex_target}")
         if not response or not response.startswith('='):
             return False
-        
+
         return self.start_motion(axis)
     
     def counts_to_degrees(self, counts, axis):
@@ -699,7 +894,21 @@ class TelescopeGUI:
         
         # Status monitor
         self.status_monitor = None
-        
+
+        # Goto tracker
+        self.goto_tracker = None
+
+        # Performance: Thread pool for parallel position queries
+        from concurrent.futures import ThreadPoolExecutor
+        self.position_query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="PosQuery")
+
+        # Performance: Cache preset positions to avoid repeated DB queries
+        self._cached_presets = {
+            'home_az': None, 'home_alt': None,
+            'stow_az': None, 'stow_alt': None
+        }
+        self._refresh_preset_cache()
+
         # State
         self.axes_moving = {1: False, 2: False}
         self.keys_pressed = set()
@@ -729,8 +938,7 @@ class TelescopeGUI:
         self.notebook.pack(fill='both', expand=True, padx=10, pady=10)
         
         self.create_control_tab()
-        self.create_comms_tab()
-        self.create_diagnostics_tab()
+        self.create_logs_tab()
         self.create_settings_tab()
     
     def create_control_tab(self):
@@ -968,10 +1176,26 @@ class TelescopeGUI:
             self.log_frame.grid_remove()
             self.log_toggle_btn.configure(text="► Activity Log")
     
-    def create_comms_tab(self):
-        """Create communications log tab with search/filter."""
-        comms_tab = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(comms_tab, text="  Comms Log  ")
+    def create_logs_tab(self):
+        """Create combined logs tab with nested notebook."""
+        logs_tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(logs_tab, text="  Logs  ")
+
+        # Create nested notebook (same pattern as Settings tab)
+        if TTKBOOTSTRAP_AVAILABLE:
+            logs_notebook = ttk.Notebook(logs_tab, bootstyle="secondary")
+        else:
+            logs_notebook = ttk.Notebook(logs_tab)
+        logs_notebook.pack(fill='both', expand=True)
+
+        # Add sub-tabs
+        self.create_comms_subtab(logs_notebook)
+        self.create_diagnostics_subtab(logs_notebook)
+
+    def create_comms_subtab(self, parent):
+        """Create communications log sub-tab."""
+        comms_tab = ttk.Frame(parent, padding=10)
+        parent.add(comms_tab, text="  Comms  ")
         
         # Controls
         control_frame = ttk.Frame(comms_tab)
@@ -1029,10 +1253,10 @@ class TelescopeGUI:
         if self.show_protocol_var.get():
             self.comms_buffer.register_callback(self.on_comms_entry)
     
-    def create_diagnostics_tab(self):
-        """Create diagnostics tab."""
-        diag_tab = ttk.Frame(self.notebook, padding=10)
-        self.notebook.add(diag_tab, text="  Diagnostics  ")
+    def create_diagnostics_subtab(self, parent):
+        """Create diagnostics sub-tab."""
+        diag_tab = ttk.Frame(parent, padding=10)
+        parent.add(diag_tab, text="  Diagnostics  ")
         
         control_frame = ttk.Frame(diag_tab)
         control_frame.pack(fill='x', pady=(0, 10))
@@ -1370,11 +1594,20 @@ class TelescopeGUI:
         """Update position display with sanity checking."""
         if not self.connected or not self.show_pos_var.get():
             return
-        
+
         try:
-            az_pos = self.protocol.get_position(self.protocol.AXIS_AZ, log_to_ui=False)
-            alt_pos = self.protocol.get_position(self.protocol.AXIS_ALT, log_to_ui=False)
-            
+            # Query both axes in parallel for improved performance
+            future_az = self.position_query_executor.submit(
+                self.protocol.get_position, self.protocol.AXIS_AZ, False
+            )
+            future_alt = self.position_query_executor.submit(
+                self.protocol.get_position, self.protocol.AXIS_ALT, False
+            )
+
+            # Wait for both results with timeout
+            az_pos = future_az.result(timeout=0.5)
+            alt_pos = future_alt.result(timeout=0.5)
+
             if az_pos is None or alt_pos is None:
                 return
             
@@ -1418,8 +1651,8 @@ class TelescopeGUI:
                 if hasattr(self, 'coord_label'):
                     self.coord_label.configure(text=f"Az: {az_deg % 360:.4f}°\nAlt: {alt_deg:.4f}°")
 
-            # Update preset button tooltips with current position
-            self.update_preset_tooltips()
+            # Update preset button tooltips with current position (pass values to avoid re-querying)
+            self.update_preset_tooltips(az_deg, alt_deg)
         except Exception:
             pass
     
@@ -1542,7 +1775,11 @@ class TelescopeGUI:
             if self.status_monitor:
                 self.status_monitor.stop()
                 self.status_monitor = None
-            
+
+            if self.goto_tracker:
+                self.goto_tracker.stop()
+                self.goto_tracker = None
+
             self.stop_all()
             if self.protocol:
                 self.protocol.close()
@@ -1593,13 +1830,19 @@ class TelescopeGUI:
                     self.protocol.send_command(":F2")
                     self.log("✓ Axes initialized")
                     
-                    self.protocol.get_counts_per_revolution(self.protocol.AXIS_AZ)
-                    self.protocol.get_counts_per_revolution(self.protocol.AXIS_ALT)
-                    self.protocol.get_timer_freq()
+                    # Ensure CPR and timer frequency are cached (performance optimization)
+                    if self.protocol.cpr_az is None:
+                        self.protocol.get_counts_per_revolution(self.protocol.AXIS_AZ)
+                    if self.protocol.cpr_alt is None:
+                        self.protocol.get_counts_per_revolution(self.protocol.AXIS_ALT)
+                    if self.protocol.timer_freq is None:
+                        self.protocol.get_timer_freq()
                     
                     self.status_monitor = StatusMonitor(self.protocol, self.file_logger, self.on_status_update)
                     self.status_monitor.start()
-                    
+
+                    self.goto_tracker = GotoTracker(self.protocol, self.file_logger, self.on_goto_complete)
+
                     self.log("✓ Ready!")
                 else:
                     self.log("✗ Failed to connect")
@@ -1731,6 +1974,21 @@ class TelescopeGUI:
     def on_status_update(self, axis, status):
         """Handle status update from monitor."""
         self.root.after(0, lambda: self._update_status_display(axis, status))
+
+    def on_goto_complete(self, axis, status, final_pos):
+        """Handle goto completion notification."""
+        axis_name = "Azimuth" if axis == '1' or axis == 1 else "Altitude"
+
+        if status == 'success':
+            self.root.after(0, lambda: self.log(f"✓ {axis_name} reached target: {final_pos:.2f}°"))
+        elif status == 'blocked':
+            self.root.after(0, lambda: self.log(f"⚠ {axis_name} blocked at {final_pos:.2f}°"))
+            self.root.after(0, lambda: messagebox.showwarning("Blocked", f"{axis_name} axis blocked!"))
+        elif status == 'failed':
+            self.root.after(0, lambda: self.log(f"✗ {axis_name} goto failed at {final_pos:.2f}°"))
+        elif status == 'timeout':
+            self.root.after(0, lambda: self.log(f"✗ {axis_name} goto timeout"))
+            self.root.after(0, lambda: messagebox.showerror("Timeout", f"{axis_name} did not reach target!"))
     
     def _update_status_display(self, axis, status):
         """Update status display."""
@@ -1756,44 +2014,54 @@ class TelescopeGUI:
     
     # -------------------- Presets --------------------
 
-    def update_preset_tooltips(self):
+    def update_preset_tooltips(self, current_az_deg=None, current_alt_deg=None):
         """Update tooltips for preset buttons with target positions."""
         if not self.connected or not self.protocol:
             return
 
         try:
-            # Get current position
-            current_az = self.protocol.get_position('1')
-            current_alt = self.protocol.get_position('2')
+            # Use provided position or query if not provided
+            if current_az_deg is None or current_alt_deg is None:
+                current_az = self.protocol.get_position('1')
+                current_alt = self.protocol.get_position('2')
 
-            if current_az is not None and current_alt is not None:
-                current_az_deg = self.protocol.counts_to_degrees(current_az, '1')
-                current_alt_deg = self.protocol.counts_to_degrees(current_alt, '2')
+                if current_az is not None and current_alt is not None:
+                    current_az_deg = self.protocol.counts_to_degrees(current_az, '1')
+                    current_alt_deg = self.protocol.counts_to_degrees(current_alt, '2')
 
-                # Update Home tooltip
-                home_az = self.db.get_float('positions.home_az', 0)
-                home_alt = self.db.get_float('positions.home_alt', 0)
-                if current_az_deg is not None and current_alt_deg is not None:
-                    delta_az = home_az - current_az_deg
-                    delta_alt = home_alt - current_alt_deg
-                    if self.home_tooltip:
-                        self.home_tooltip.update_text(
-                            f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°\n"
-                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
-                        )
+            if current_az_deg is not None and current_alt_deg is not None:
+                # Update Home tooltip (use cached values)
+                home_az = self._cached_presets['home_az']
+                home_alt = self._cached_presets['home_alt']
+                delta_az = home_az - current_az_deg
+                delta_alt = home_alt - current_alt_deg
+                if self.home_tooltip:
+                    self.home_tooltip.update_text(
+                        f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°\n"
+                        f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                    )
 
-                    # Update Stow tooltip
-                    stow_az = self.db.get_float('positions.stow_az', 0)
-                    stow_alt = self.db.get_float('positions.stow_alt', 90)
-                    delta_az = stow_az - current_az_deg
-                    delta_alt = stow_alt - current_alt_deg
-                    if self.stow_tooltip:
-                        self.stow_tooltip.update_text(
-                            f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°\n"
-                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
-                        )
+                # Update Stow tooltip (use cached values)
+                stow_az = self._cached_presets['stow_az']
+                stow_alt = self._cached_presets['stow_alt']
+                delta_az = stow_az - current_az_deg
+                delta_alt = stow_alt - current_alt_deg
+                if self.stow_tooltip:
+                    self.stow_tooltip.update_text(
+                        f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°\n"
+                        f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                    )
         except Exception as e:
             self.file_logger.log(f"Error updating tooltips: {e}", level='DEBUG')
+
+    def _refresh_preset_cache(self):
+        """Refresh cached preset positions from database."""
+        self._cached_presets = {
+            'home_az': self.db.get_float('positions.home_az', 0),
+            'home_alt': self.db.get_float('positions.home_alt', 0),
+            'stow_az': self.db.get_float('positions.stow_az', 0),
+            'stow_alt': self.db.get_float('positions.stow_alt', 90)
+        }
 
     def goto_home(self):
         if not self.connected:
@@ -1801,8 +2069,12 @@ class TelescopeGUI:
         home_az = self.protocol.degrees_to_counts(self.db.get_float('positions.home_az'), '1')
         home_alt = self.protocol.degrees_to_counts(self.db.get_float('positions.home_alt'), '2')
         if home_az is not None and home_alt is not None:
-            self.protocol.goto_position('1', home_az)
-            self.protocol.goto_position('2', home_alt)
+            if self.protocol.goto_position('1', home_az):
+                if self.goto_tracker:
+                    self.goto_tracker.start_goto('1', home_az)
+            if self.protocol.goto_position('2', home_alt):
+                if self.goto_tracker:
+                    self.goto_tracker.start_goto('2', home_alt)
             self.log("Going to HOME")
     
     def set_home(self):
@@ -1824,6 +2096,7 @@ class TelescopeGUI:
 
                 self.db.set('positions.home_az', str(az_deg))
                 self.db.set('positions.home_alt', str(alt_deg))
+                self._refresh_preset_cache()  # Refresh cache after setting
                 self.log(f"HOME set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
                 self.update_preset_tooltips()  # Update tooltips immediately
     
@@ -1833,8 +2106,12 @@ class TelescopeGUI:
         stow_az = self.protocol.degrees_to_counts(self.db.get_float('positions.stow_az'), '1')
         stow_alt = self.protocol.degrees_to_counts(self.db.get_float('positions.stow_alt'), '2')
         if stow_az is not None and stow_alt is not None:
-            self.protocol.goto_position('1', stow_az)
-            self.protocol.goto_position('2', stow_alt)
+            if self.protocol.goto_position('1', stow_az):
+                if self.goto_tracker:
+                    self.goto_tracker.start_goto('1', stow_az)
+            if self.protocol.goto_position('2', stow_alt):
+                if self.goto_tracker:
+                    self.goto_tracker.start_goto('2', stow_alt)
             self.log("Going to STOW")
     
     def set_stow(self):
@@ -1856,6 +2133,7 @@ class TelescopeGUI:
 
                 self.db.set('positions.stow_az', str(az_deg))
                 self.db.set('positions.stow_alt', str(alt_deg))
+                self._refresh_preset_cache()  # Refresh cache after setting
                 self.log(f"STOW set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
                 self.update_preset_tooltips()  # Update tooltips immediately
     

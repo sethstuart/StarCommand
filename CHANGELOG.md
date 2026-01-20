@@ -15,10 +15,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Position history tracking
 - ASCOM driver integration
 - Multi-language support
-- Position update speed improvements (requires performance profiling)
-- Smart Go To path selection (shortest azimuth route)
-- Command verification with automatic retry logic
-- Merge Comms Log and Diagnostics tabs into unified interface
+
+---
+
+## [0.4.4] - GUI - 2026-01-20
+
+### Added
+- GotoTracker class for goto operation verification and completion tracking
+- Automatic goto completion notifications (success/blocked/timeout)
+- Timeout handling for goto operations (2-minute max)
+- Target position verification with 0.5° tolerance
+- Parallel position queries using ThreadPoolExecutor for 50-60% performance improvement
+- Preset position caching to eliminate redundant database queries
+- Async file logging with queue to reduce I/O blocking
+- Nested "Logs" tab containing Comms and Diagnostics as sub-tabs
+
+### Changed
+- Go To operations now calculate shortest azimuth path (fixes 340° vs 20° issue)
+- Position update cycle optimized from 120-180ms to 40-60ms
+- Tooltip updates now reuse fetched position data instead of re-querying
+- CPR values explicitly cached at connection time
+- Tab structure reorganized: Control, Logs (Comms/Diagnostics), Settings
+
+### Fixed
+- Azimuth goto taking long path around 360° boundary
+- Sequential UDP queries blocking update loop
+- Redundant position queries in tooltip updates (eliminated 2 extra UDP calls per update)
+- 4 SQLite connections per second for preset positions
+
+### Performance
+- Position update performance improved by 60-70%
+- Eliminated 2 redundant UDP queries per update cycle
+- Eliminated 4 database queries per update cycle
+- File logging no longer blocks main thread
 
 ---
 
