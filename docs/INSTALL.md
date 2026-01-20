@@ -1,6 +1,12 @@
-# SkyWatcher Controller v2.0 - Installation & Setup Guide
+# SkyWatcher Controller - Installation & Setup Guide
 
 Complete professional telescope control suite with GUI and CLI interfaces.
+
+**Applications**:
+- **StarCommandGUI.py** - Full-featured graphical interface (v0.4.1)
+- **StarCommandCLI.py** - Command-line interface (v2.0)
+
+---
 
 ## 🚀 Quick Start
 
@@ -19,17 +25,17 @@ chmod +x install.sh
 source venv/bin/activate
 
 # Run GUI
-skywatcher-gui
+python StarCommandGUI.py
 
 # OR run CLI
-skywatcher-cli
+python StarCommandCLI.py
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
 # If you get execution policy errors, run PowerShell as Administrator:
-# Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
 # Run installer
 .\install.ps1
@@ -38,10 +44,10 @@ skywatcher-cli
 .\venv\Scripts\Activate.ps1
 
 # Run GUI
-skywatcher-gui
+python StarCommandGUI.py
 
 # OR run CLI
-skywatcher-cli
+python StarCommandCLI.py
 ```
 
 #### Windows (Command Prompt / Batch)
@@ -54,82 +60,32 @@ install.bat
 venv\Scripts\activate.bat
 
 # Run GUI
-skywatcher-gui
+python StarCommandGUI.py
 
 # OR run CLI
-skywatcher-cli
+python StarCommandCLI.py
 ```
 
-### Method 2: Manual Setup
-
-#### Linux / macOS
-
-```bash
-# Create virtual environment
-python3 -m venv venv
-
-# Activate it
-source venv/bin/activate
-
-# Install in development mode
-pip install -e .
-
-# Run
-skywatcher-gui  # or skywatcher-cli
-```
-
-#### Windows (PowerShell)
-
-```powershell
-# Create virtual environment
-python -m venv venv
-
-# Activate it
-.\venv\Scripts\Activate.ps1
-
-# Install in development mode
-pip install -e .
-
-# Run
-skywatcher-gui  # or skywatcher-cli
-```
-
-#### Windows (Command Prompt)
-
-```cmd
-# Create virtual environment
-python -m venv venv
-
-# Activate it
-venv\Scripts\activate.bat
-
-# Install in development mode
-pip install -e .
-
-# Run
-skywatcher-gui  # or skywatcher-cli
-```
-
-### Method 3: Direct Execution (No Installation)
+### Method 2: Direct Execution (No Virtual Environment)
 
 #### Linux / macOS
 
 ```bash
 # GUI
-python3 telescope_gui_v2.py
+python3 StarCommandGUI.py
 
 # CLI
-python3 telescope_control_v2.py [ip] [port]
+python3 StarCommandCLI.py [ip] [port]
 ```
 
 #### Windows
 
 ```cmd
 # GUI
-python telescope_gui_v2.py
+python StarCommandGUI.py
 
 # CLI
-python telescope_control_v2.py [ip] [port]
+python StarCommandCLI.py [ip] [port]
 ```
 
 ---
@@ -180,30 +136,48 @@ To verify tkinter is installed:
 python -c "import tkinter; print('tkinter OK')"
 ```
 
+### Optional: Modern Themes (GUI)
+
+For modern, professional themes in the GUI:
+
+```bash
+pip install ttkbootstrap
+```
+
+This provides beautiful dark and light themes. Without it, the GUI uses standard tkinter styling.
+
 **CLI version has no dependencies!** (Pure Python stdlib)
 
 ---
 
-## 🎨 GUI Version Features
+## 🎨 GUI Version Features (StarCommandGUI.py)
 
 ### Main Features
 ✅ **Tabbed Interface**
   - **Control Tab**: Direction pad, speed control, preset positions
-  - **Status Tab**: Live mount status, auto-update capability
-  - **Settings Tab**: Keyboard controls, themes, connection settings
-  - **Info Tab**: Mount information, command log
+  - **Diagnostics Tab**: Mount status, auto-update capability  
+  - **Settings Tab**: Keyboard controls, themes, connection settings, logging
 
 ✅ **Full Keyboard Support**
   - WASD or Arrow keys for movement
   - Space to stop
   - ESC for emergency stop
-  - +/- for speed control
   - All keys configurable!
 
-✅ **Configurable Themes**
-  - Customize all colors
-  - Dark mode by default
-  - Persistent settings
+✅ **Control Modes**
+  - **Latching**: Click to start, click stop to end
+  - **Momentary**: Hold to move, release to stop
+
+✅ **Safety Features**
+  - Altitude limits (min/max) with enforcement
+  - Emergency stop (button + ESC key)
+  - Real-time blocked motion detection
+  - Status monitoring (200ms polling)
+
+✅ **Configurable Themes** (with ttkbootstrap)
+  - Dark themes: darkly, cyborg, vapor, solar, superhero
+  - Light themes: flatly, journal, litera, minty, pulse, yeti
+  - Persistent theme selection
 
 ✅ **Position Display Options**
   - Degrees
@@ -214,15 +188,16 @@ python -c "import tkinter; print('tkinter OK')"
 ✅ **Preset Positions**
   - Home position (set/goto)
   - Stow position (set/goto)
-  - Saved to config
+  - Saved to database
 
-✅ **Emergency Stop**
-  - Large prominent button
-  - ESC key hotkey
-  - Instant stop both axes
+✅ **Comprehensive Logging**
+  - Automatic file logging to `logs/` directory
+  - Configurable retention (0-500 files, default 30)
+  - Debug mode for detailed command logging
+  - Automatic cleanup of old logs
 
-✅ **Configuration Management**
-  - All settings saved to `~/.skywatcher_controller/config.json`
+✅ **SQLite Configuration**
+  - All settings saved to database
   - Per-user configuration
   - Survives restarts
 
@@ -236,14 +211,12 @@ python -c "import tkinter; print('tkinter OK')"
 | D / → | Move Right |
 | Space | Stop All |
 | ESC | Emergency Stop |
-| + | Speed Up |
-| - | Speed Down |
 
-**All configurable in Settings tab!**
+**All configurable in Settings → Controls tab!**
 
 ---
 
-## 💻 CLI Version Features
+## 💻 CLI Version Features (StarCommandCLI.py)
 
 ### Enhanced Commands
 
@@ -296,12 +269,10 @@ quit / q             - Exit
 
 ### Configuration
 
-CLI uses same config file as GUI: 
+CLI uses JSON config file: 
 
 **Linux/macOS**: `~/.skywatcher_controller/config.json`  
 **Windows**: `%USERPROFILE%\.skywatcher_controller\config.json`
-
-(Typically: `C:\Users\YourName\.skywatcher_controller\config.json`)
 
 Settings include:
 - Default IP and port
@@ -331,72 +302,42 @@ Settings include:
 **Default IP:** 192.168.4.1 (AP mode)
 **Default Port:** 11880 (UDP)
 
-### Keyboard Controls
+### Keyboard Controls (GUI)
 
-**GUI:** Settings Tab → Keyboard
+**GUI:** Settings Tab → Controls
 
-Configure any key for any action. Changes take effect after restart.
+Configure any key for any action. Changes apply immediately after saving.
 
-### Theme Customization
+### Theme Customization (GUI)
 
 **GUI:** Settings Tab → Theme
 
-Customize:
-- Background color
-- Foreground color
-- Button colors
-- Accent color
-- Emergency stop color
+Choose from built-in ttkbootstrap themes (requires `pip install ttkbootstrap`):
+- **Dark**: darkly, cyborg, vapor, solar, superhero  
+- **Light**: flatly, journal, litera, minty, pulse, yeti
 
-Click color pickers to choose colors, save, and restart to apply.
+Theme changes apply immediately.
 
-### Speed Settings
+### Altitude Limits (GUI)
 
-```json
-{
-  "speed": {
-    "default": 1.0,
-    "min": 0.1,
-    "max": 10.0
-  }
-}
-```
+**GUI:** Settings Tab → Controls
 
-Adjust in config file and restart, or use GUI speed slider.
+Set minimum and maximum altitude limits to prevent dangerous movements:
+- Default minimum: -5°
+- Default maximum: 90°
+- Enforcement can be toggled on/off
 
-### Position Display
+### Logging (GUI)
 
-```json
-{
-  "display": {
-    "position_format": "both",
-    "show_positions": true,
-    "auto_update": false,
-    "update_rate": 1.0
-  }
-}
-```
+**GUI:** Settings Tab → Logging
 
-**Formats:**
-- `degrees` - Show in degrees only
-- `raw` - Show raw counts only
-- `both` - Show both (default)
-- `coordinates` - Show as Alt/Az coordinates
+Configure file logging:
+- **Debug Mode**: Log all commands and responses
+- **Retention**: Number of log files to keep (0-500)
+  - Default: 30 files
+  - Set to 0 to disable file logging
 
-### Preset Positions
-
-```json
-{
-  "positions": {
-    "home_az": 0,
-    "home_alt": 0,
-    "stow_az": 0,
-    "stow_alt": 90
-  }
-}
-```
-
-Set via "Set Current as Home/Stow" buttons or edit config directly.
+Logs stored in: `[script_directory]/logs/`
 
 ---
 
@@ -440,34 +381,6 @@ install.bat
 3. Check "tcl/tk and IDLE" under Optional Features
 4. Complete installation
 
-#### Virtual Environment Activation Issues
-
-**PowerShell**:
-```powershell
-# If venv activation fails
-.\venv\Scripts\Activate.ps1
-
-# Alternative
-python -m venv --clear venv
-.\venv\Scripts\Activate.ps1
-```
-
-**Command Prompt**:
-```cmd
-# Use .bat instead of .ps1
-venv\Scripts\activate.bat
-```
-
-#### Path Too Long Errors
-
-Windows has a 260 character path limit (older versions).
-
-**Solution**:
-1. Install in a shorter path (e.g., `C:\skywatcher\`)
-2. Or enable long paths in Windows 10+:
-   - Run as Admin: `New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force`
-   - Restart computer
-
 ### Linux/macOS Issues
 
 #### tkinter not found
@@ -494,7 +407,7 @@ python3 -c "import tkinter; print('OK')"
 
 3. **Test with CLI first:**
    ```bash
-   python3 telescope_control_v2.py 192.168.4.1 11880
+   python StarCommandCLI.py 192.168.4.1 11880
    ```
 
 4. **Check firewall:**
@@ -509,17 +422,12 @@ python3 -c "import tkinter; print('OK')"
 
 Linux/macOS:
 ```bash
-rm ~/.skywatcher_controller/config.json
+rm -rf ~/.skywatcher_controller/
 ```
 
 Windows (PowerShell):
 ```powershell
-Remove-Item $env:USERPROFILE\.skywatcher_controller\config.json
-```
-
-Windows (Command Prompt):
-```cmd
-del %USERPROFILE%\.skywatcher_controller\config.json
+Remove-Item -Recurse -Force $env:USERPROFILE\.skywatcher_controller
 ```
 
 **Check config location:**
@@ -527,32 +435,11 @@ del %USERPROFILE%\.skywatcher_controller\config.json
 Linux/macOS:
 ```bash
 ls -la ~/.skywatcher_controller/
-cat ~/.skywatcher_controller/config.json
 ```
 
-Windows (PowerShell):
-```powershell
-Get-ChildItem $env:USERPROFILE\.skywatcher_controller\
-Get-Content $env:USERPROFILE\.skywatcher_controller\config.json
-```
-
-Windows (Command Prompt):
+Windows:
 ```cmd
 dir %USERPROFILE%\.skywatcher_controller\
-type %USERPROFILE%\.skywatcher_controller\config.json
-```
-
-### Import Errors
-
-```bash
-# Ensure virtual environment is activated
-source venv/bin/activate
-
-# Verify Python version
-python --version  # Should be 3.7+
-
-# Reinstall
-pip install -e .
 ```
 
 ---
@@ -561,24 +448,30 @@ pip install -e .
 
 ```
 skywatcher-controller/
-├── telescope_gui_v2.py       # GUI application
-├── telescope_control_v2.py   # CLI application
-├── setup.py                  # Package setup
-├── requirements.txt          # Dependencies (empty!)
+├── StarCommandGUI.py         # GUI application (v0.4.1)
+├── StarCommandCLI.py         # CLI application (v2.0)
+├── setup.py                  # Package setup (optional)
+├── requirements.txt          # Dependencies (optional for themes)
 ├── install.sh               # Linux/Mac installer
 ├── install.ps1              # Windows PowerShell installer
 ├── install.bat              # Windows batch installer
-├── INSTALL.md               # This file
-├── README_FULL.md           # User guide
-├── PROTOCOL_REFERENCE.md    # Protocol docs
-├── WHATS_NEW.md             # Changes from v1
-└── venv/                    # Virtual environment (created)
+├── README.md                # Project overview
+├── docs/
+│   ├── INSTALL.md           # This file
+│   ├── USER_GUIDE.md        # Complete user guide
+│   ├── PROTOCOL_REFERENCE.md # Protocol documentation
+│   ├── TROUBLESHOOTING.md   # Troubleshooting guide
+│   └── FINAL_FIX_SUMMARY.md # Technical fixes summary
+└── logs/                    # Created automatically by GUI
+    └── telescope_control_*.log
 
 ~/.skywatcher_controller/     # Linux/Mac config location
-└── config.json              # User configuration
+├── settings.db              # GUI configuration (SQLite)
+└── config.json              # CLI configuration
 
 %USERPROFILE%\.skywatcher_controller\  # Windows config location
-└── config.json              # User configuration
+├── settings.db              # GUI configuration
+└── config.json              # CLI configuration
 ```
 
 ---
@@ -590,21 +483,21 @@ skywatcher-controller/
 **Linux/macOS:**
 ```bash
 # Direct run
-python3 telescope_gui_v2.py
+python3 StarCommandGUI.py
 
 # From venv
 source venv/bin/activate
-skywatcher-gui
+python StarCommandGUI.py
 ```
 
 **Windows:**
 ```cmd
 # Direct run
-python telescope_gui_v2.py
+python StarCommandGUI.py
 
 # From venv
 venv\Scripts\activate.bat
-skywatcher-gui
+python StarCommandGUI.py
 ```
 
 **Workflow:**
@@ -613,40 +506,29 @@ skywatcher-gui
 3. Use direction pad or WASD keys
 4. Adjust speed slider
 5. Set home position
-6. Enable auto-update to monitor
+6. Configure settings as needed
 
 ### CLI
 
 **Linux/macOS:**
 ```bash
 # Default IP
-python3 telescope_control_v2.py
+python3 StarCommandCLI.py
 
 # Custom IP
-python3 telescope_control_v2.py 192.168.10.50
+python3 StarCommandCLI.py 192.168.10.50
 
 # Custom IP and port
-python3 telescope_control_v2.py 192.168.10.50 11880
-
-# From venv
-source venv/bin/activate
-skywatcher-cli
+python3 StarCommandCLI.py 192.168.10.50 11880
 ```
 
 **Windows:**
 ```cmd
 # Default IP
-python telescope_control_v2.py
+python StarCommandCLI.py
 
 # Custom IP
-python telescope_control_v2.py 192.168.10.50
-
-# Custom IP and port  
-python telescope_control_v2.py 192.168.10.50 11880
-
-# From venv
-venv\Scripts\activate.bat
-skywatcher-cli
+python StarCommandCLI.py 192.168.10.50
 ```
 
 **Example session:**
@@ -676,112 +558,27 @@ skywatcher-cli
 6. **Balanced mount** - ensure proper balance before slewing
 7. **Clear obstacles** - check for obstructions
 8. **Never leave unattended** while moving
+9. **Altitude limits** - set appropriate limits in GUI
+10. **Battery voltage** - maintain adequate power (7.5V minimum)
 
 ---
 
 ## 🆘 Support
 
 ### Documentation
-- README_FULL.md - Complete user guide
-- PROTOCOL_REFERENCE.md - Technical protocol details
-- WHATS_NEW.md - Version 2.0 changes
+- [User Guide](USER_GUIDE.md) - Complete feature documentation
+- [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions
+- [Protocol Reference](PROTOCOL_REFERENCE.md) - Technical protocol details
 
 ### Community
-- GitHub: https://github.com/skywatcher-pacific/skywatcher_open
-- Issues: Report bugs on GitHub
+- GitHub Issues: Report bugs
+- GitHub Discussions: Ask questions and share tips
 
-### Logs
-Enable auto-update and check command log for debugging.
-
----
-
-## 🪟 Windows Command Reference
-
-### Virtual Environment
-
-**Create:**
-```cmd
-python -m venv venv
-```
-
-**Activate (PowerShell):**
-```powershell
-.\venv\Scripts\Activate.ps1
-```
-
-**Activate (Command Prompt):**
-```cmd
-venv\Scripts\activate.bat
-```
-
-**Deactivate (both):**
-```cmd
-deactivate
-```
-
-### Running Applications
-
-**After activating venv:**
-```cmd
-skywatcher-gui
-skywatcher-cli
-```
-
-**Direct execution (no venv):**
-```cmd
-python telescope_gui_v2.py
-python telescope_control_v2.py
-```
-
-### Common Tasks
-
-**Check Python version:**
-```cmd
-python --version
-```
-
-**Check if tkinter is installed:**
-```cmd
-python -c "import tkinter; print('tkinter OK')"
-```
-
-**Find config file:**
-```cmd
-echo %USERPROFILE%\.skywatcher_controller\config.json
-```
-
-**View config file:**
-```cmd
-type %USERPROFILE%\.skywatcher_controller\config.json
-```
-
-**Open config folder in Explorer:**
-```cmd
-explorer %USERPROFILE%\.skywatcher_controller
-```
-
-### Troubleshooting
-
-**Reset Python cache:**
-```cmd
-del /s /q __pycache__
-del /s /q *.pyc
-```
-
-**Reinstall package:**
-```cmd
-venv\Scripts\activate.bat
-pip uninstall skywatcher-controller
-pip install -e .
-```
-
-**Full clean reinstall:**
-```cmd
-rmdir /s /q venv
-python -m venv venv
-venv\Scripts\activate.bat
-pip install -e .
-```
+### Logs (GUI)
+Located in `[script_directory]/logs/`
+- Enable debug mode for detailed troubleshooting
+- Check logs after any issues
+- Include relevant log excerpts when reporting problems
 
 ---
 
@@ -796,20 +593,28 @@ MIT License - Free to use and modify
 ## 🎯 Tips
 
 1. **First time setup:**
-   - Connect in GUI
-   - Query mount info
+   - Connect with GUI first (easier)
+   - Query mount info in Diagnostics tab
    - Set home position
    - Test all directions at low speed
+   - Configure altitude limits for safety
 
 2. **Regular use:**
-   - Enable auto-update for monitoring
    - Use keyboard controls for quick moves
+   - CLI for scripting and automation
+   - GUI for interactive control and monitoring
    - Save presets for common positions
 
 3. **Advanced:**
    - Customize theme for night vision
-   - Configure keyboard shortcuts
-   - Adjust speed range for your needs
+   - Configure keyboard shortcuts to your preference
+   - Adjust altitude limits for your setup
+   - Use debug logging when troubleshooting
+
+4. **Performance:**
+   - Disable debug mode when not needed
+   - Adjust auto-update rate if needed
+   - Reduce log retention for less disk usage
 
 ---
 

@@ -1,0 +1,41 @@
+MIT License
+
+Copyright (c) 2024-2025 SkyWatcher Controller Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+DISCLAIMER:
+
+This software is not affiliated with, endorsed by, or sponsored by Sky-Watcher
+or Synta Technology Corp. Sky-Watcher is a registered trademark of Synta
+Technology Corp.
+
+This software is provided for educational and personal use. Use of this
+software with telescope equipment is at your own risk. The authors and
+contributors are not responsible for any damage to equipment, property, or
+injury that may result from the use of this software.
+
+Always follow proper safety procedures when operating telescope equipment.
+Never leave motorized equipment unattended. Ensure proper balance and
+mechanical setup before automated movement.
+
+Users are responsible for compliance with all local regulations regarding
+radio frequency devices and wireless communications.

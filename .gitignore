@@ -1,0 +1,187 @@
+# SkyWatcher Controller - Git Ignore File
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environments
+venv/
+env/
+ENV/
+.venv
+
+# Distribution / Packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# Operating Systems
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Application Specific
+
+# Log files (keep directory, ignore contents)
+logs/*.log
+logs/telescope_control_*.log
+logs/
+
+# Database files (user configuration)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# User configuration directory
+# (Uncomment if you don't want to track user configs)
+# .skywatcher_controller/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*~.nib
+
+# Documentation builds
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# Compiled translations
+*.mo
+*.pot
+
+# Sphinx documentation
+docs/build/
+
+# PyBuilder
+target/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# profiling data
+.prof
+
+# User-specific application data
+# Uncomment these if you don't want to track personal configs
+# config.json
+# settings.db
+
+# Build artifacts from installers
+*.exe
+*.msi
+
+# macOS
+.AppleDouble
+.LSOverride
+
+# Windows
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# Backup files
+*.orig
+
+# Test output
+test-results/
+test-output/
+
+# Old/backup files to ignore
+*.old
+.gitignore.new
