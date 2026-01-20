@@ -1,9 +1,9 @@
-# SkyWatcher Telescope Controller Requirements
+# Star Command - Telescope Controller Requirements
 # Python 3.7+
 
-# No external dependencies for CLI version!
-# GUI version only requires tkinter (usually pre-installed)
+# Optional GUI theme support (recommended)
+ttkbootstrap>=1.10.0
 
-# For development/testing (optional):
-# pytest>=7.0.0
-# pytest-cov>=3.0.0
+# No other external dependencies!
+# tkinter is included with Python (required for GUI)
+# CLI version has zero dependencies (pure Python stdlib)

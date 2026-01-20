@@ -46,9 +46,12 @@ try:
     from ttkbootstrap.constants import *
     # Updated imports to avoid deprecation warnings
     try:
-        from ttkbootstrap.scrolled import ScrolledText
-    except ImportError:
-        from ttkbootstrap.widgets import ScrolledText
+        from ttkbootstrap.widgets.scrolled import ScrolledText
+    except (ImportError, AttributeError):
+        try:
+            from ttkbootstrap.scrolled import ScrolledText
+        except ImportError:
+            from ttkbootstrap.widgets import ScrolledText
     TTKBOOTSTRAP_AVAILABLE = True
 except ImportError:
     pass
@@ -85,6 +88,41 @@ POSITION_SANITY_MIN_DEG = -720.0  # Allow 2 full rotations negative
 POSITION_SANITY_MAX_DEG = 720.0   # Allow 2 full rotations positive
 ALTITUDE_SANITY_MIN_DEG = -90.0
 ALTITUDE_SANITY_MAX_DEG = 180.0   # Allow some overflow for wrap
+
+
+class ToolTip:
+    """Simple tooltip class for widgets."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tooltip = None
+        self.widget.bind('<Enter>', self.show_tooltip)
+        self.widget.bind('<Leave>', self.hide_tooltip)
+
+    def show_tooltip(self, event=None):
+        if self.tooltip or not self.text:
+            return
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+
+        self.tooltip = tk.Toplevel(self.widget)
+        self.tooltip.wm_overrideredirect(True)
+        self.tooltip.wm_geometry(f"+{x}+{y}")
+
+        label = tk.Label(self.tooltip, text=self.text, justify='left',
+                        background="#ffffe0", relief='solid', borderwidth=1,
+                        font=("TkDefaultFont", 9))
+        label.pack()
+
+    def hide_tooltip(self, event=None):
+        if self.tooltip:
+            self.tooltip.destroy()
+            self.tooltip = None
+
+    def update_text(self, new_text):
+        """Update tooltip text dynamically."""
+        self.text = new_text
 
 
 class DatabaseConfig:
@@ -664,6 +702,9 @@ class TelescopeGUI:
         
         # State
         self.axes_moving = {1: False, 2: False}
+        self.keys_pressed = set()
+        self.estop_active = False
+        self.limit_check_job = None  # Job ID for limit checking
         self.update_thread = None
         self.update_running = False
         self.estop_active = False
@@ -735,12 +776,17 @@ class TelescopeGUI:
             dir_frame = ttk.LabelFrame(control_tab, text="Motion Control", padding=15)
         dir_frame.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
         
+        # Center the direction pad grid within dir_frame
+        dir_frame.columnconfigure(0, weight=1)
+        dir_frame.columnconfigure(1, weight=0)  # Center column (buttons)
+        dir_frame.columnconfigure(2, weight=1)
+
         # Direction buttons
         btn_width = 10
         if TTKBOOTSTRAP_AVAILABLE:
             self.btn_up = ttk.Button(dir_frame, text="▲ UP", width=btn_width, bootstyle="info-outline")
             self.btn_left = ttk.Button(dir_frame, text="◄ LEFT", width=btn_width, bootstyle="info-outline")
-            self.btn_stop = ttk.Button(dir_frame, text="■ STOP", width=btn_width, 
+            self.btn_stop = ttk.Button(dir_frame, text="■ STOP", width=btn_width,
                                        command=self.stop_all, bootstyle="warning")
             self.btn_right = ttk.Button(dir_frame, text="► RIGHT", width=btn_width, bootstyle="info-outline")
             self.btn_down = ttk.Button(dir_frame, text="▼ DOWN", width=btn_width, bootstyle="info-outline")
@@ -750,7 +796,7 @@ class TelescopeGUI:
             self.btn_stop = ttk.Button(dir_frame, text="■ STOP", width=btn_width, command=self.stop_all)
             self.btn_right = ttk.Button(dir_frame, text="► RIGHT", width=btn_width)
             self.btn_down = ttk.Button(dir_frame, text="▼ DOWN", width=btn_width)
-        
+
         self.btn_up.grid(row=0, column=1, padx=5, pady=5)
         self.btn_left.grid(row=1, column=0, padx=5, pady=5)
         self.btn_stop.grid(row=1, column=1, padx=5, pady=5)
@@ -815,14 +861,38 @@ class TelescopeGUI:
         else:
             preset_frame = ttk.LabelFrame(control_tab, text="Presets", padding=15)
         preset_frame.grid(row=1, column=1, sticky='nsew', padx=5, pady=5)
-        
-        for text, cmd in [("Go to Home", self.goto_home), ("Set as Home", self.set_home),
-                          ("Go to Stow", self.goto_stow), ("Set as Stow", self.set_stow)]:
-            if TTKBOOTSTRAP_AVAILABLE:
-                ttk.Button(preset_frame, text=text, command=cmd, width=18, 
-                          bootstyle="success-outline").pack(pady=5)
-            else:
-                ttk.Button(preset_frame, text=text, command=cmd, width=18).pack(pady=5)
+
+        # Create preset buttons with tooltips
+        self.home_tooltip = None
+        self.stow_tooltip = None
+
+        if TTKBOOTSTRAP_AVAILABLE:
+            self.btn_goto_home = ttk.Button(preset_frame, text="Go to Home", command=self.goto_home,
+                                            width=18, bootstyle="success-outline")
+        else:
+            self.btn_goto_home = ttk.Button(preset_frame, text="Go to Home", command=self.goto_home, width=18)
+        self.btn_goto_home.pack(pady=5)
+        self.home_tooltip = ToolTip(self.btn_goto_home, "Loading...")
+
+        if TTKBOOTSTRAP_AVAILABLE:
+            ttk.Button(preset_frame, text="Set as Home", command=self.set_home,
+                      width=18, bootstyle="success-outline").pack(pady=5)
+        else:
+            ttk.Button(preset_frame, text="Set as Home", command=self.set_home, width=18).pack(pady=5)
+
+        if TTKBOOTSTRAP_AVAILABLE:
+            self.btn_goto_stow = ttk.Button(preset_frame, text="Go to Stow", command=self.goto_stow,
+                                            width=18, bootstyle="success-outline")
+        else:
+            self.btn_goto_stow = ttk.Button(preset_frame, text="Go to Stow", command=self.goto_stow, width=18)
+        self.btn_goto_stow.pack(pady=5)
+        self.stow_tooltip = ToolTip(self.btn_goto_stow, "Loading...")
+
+        if TTKBOOTSTRAP_AVAILABLE:
+            ttk.Button(preset_frame, text="Set as Stow", command=self.set_stow,
+                      width=18, bootstyle="success-outline").pack(pady=5)
+        else:
+            ttk.Button(preset_frame, text="Set as Stow", command=self.set_stow, width=18).pack(pady=5)
         
         ttk.Separator(preset_frame, orient='horizontal').pack(fill='x', pady=15)
         
@@ -889,7 +959,7 @@ class TelescopeGUI:
         self.log_frame.grid(row=3, column=0, columnspan=3, sticky='ew', padx=5, pady=(0, 5))
         
         if TTKBOOTSTRAP_AVAILABLE:
-            self.log_text = ScrolledText(self.log_frame, height=4, autohide=True)
+            self.log_text = ScrolledText(self.log_frame, height=4, autohide=True, state='disabled')
         else:
             self.log_text = TkScrolledText(self.log_frame, height=4, font=('Consolas', 9), state='disabled')
         self.log_text.pack(fill='both', expand=True)
@@ -1347,6 +1417,9 @@ class TelescopeGUI:
             elif fmt == 'coordinates':
                 if hasattr(self, 'coord_label'):
                     self.coord_label.configure(text=f"Az: {az_deg % 360:.4f}°\nAlt: {alt_deg:.4f}°")
+
+            # Update preset button tooltips with current position
+            self.update_preset_tooltips()
         except Exception:
             pass
     
@@ -1356,16 +1429,13 @@ class TelescopeGUI:
         """Log to activity log (user events only)."""
         timestamp = datetime.now().strftime("%H:%M:%S")
         entry = f"[{timestamp}] {message}"
-        
-        if TTKBOOTSTRAP_AVAILABLE:
-            self.log_text.insert('end', entry + "\n")
-            self.log_text.see('end')
-        else:
-            self.log_text.configure(state='normal')
-            self.log_text.insert('end', entry + "\n")
-            self.log_text.see('end')
-            self.log_text.configure(state='disabled')
-        
+
+        # Temporarily enable editing to insert log entry, then disable
+        self.log_text.configure(state='normal')
+        self.log_text.insert('end', entry + "\n")
+        self.log_text.see('end')
+        self.log_text.configure(state='disabled')
+
         self.file_logger.log(message, level=level)
     
     def toggle_log_expanded(self):
@@ -1382,12 +1452,9 @@ class TelescopeGUI:
     
     def clear_activity_log(self):
         """Clear activity log."""
-        if TTKBOOTSTRAP_AVAILABLE:
-            self.log_text.delete('1.0', 'end')
-        else:
-            self.log_text.configure(state='normal')
-            self.log_text.delete('1.0', 'end')
-            self.log_text.configure(state='disabled')
+        self.log_text.configure(state='normal')
+        self.log_text.delete('1.0', 'end')
+        self.log_text.configure(state='disabled')
     
     # -------------------- Comms Log --------------------
     
@@ -1481,14 +1548,18 @@ class TelescopeGUI:
                 self.protocol.close()
             self.protocol = None
             self.connected = False
-            
+
+            # Re-enable IP/Port fields when disconnected
+            self.ip_entry.configure(state='normal')
+            self.port_entry.configure(state='normal')
+
             if TTKBOOTSTRAP_AVAILABLE:
                 self.connect_btn.configure(text="Connect", bootstyle="success")
                 self.status_label.configure(text="● Disconnected", bootstyle="danger")
             else:
                 self.connect_btn.configure(text="Connect")
                 self.status_label.configure(text="● Disconnected", foreground="red")
-            
+
             self.log("Disconnected")
         else:
             ip = self.ip_entry.get()
@@ -1504,14 +1575,18 @@ class TelescopeGUI:
                 version = self.protocol.get_motor_board_version('1')
                 if version:
                     self.connected = True
-                    
+
+                    # Disable IP/Port fields during connection
+                    self.ip_entry.configure(state='disabled')
+                    self.port_entry.configure(state='disabled')
+
                     if TTKBOOTSTRAP_AVAILABLE:
                         self.connect_btn.configure(text="Disconnect", bootstyle="danger")
                         self.status_label.configure(text="● Connected", bootstyle="success")
                     else:
                         self.connect_btn.configure(text="Disconnect")
                         self.status_label.configure(text="● Connected", foreground="green")
-                    
+
                     self.log(f"✓ Connected - Version: {version}")
                     
                     self.protocol.send_command(":F1")
@@ -1559,23 +1634,56 @@ class TelescopeGUI:
             return False
         
         return True
-    
+
+    def start_limit_checking(self):
+        """Start periodic limit checking for momentary mode."""
+        if self.limit_check_job:
+            self.root.after_cancel(self.limit_check_job)
+        self.limit_check_job = self.root.after(100, self.check_limits_during_motion)
+
+    def check_limits_during_motion(self):
+        """Continuously check limits during motion in momentary mode."""
+        if not self.connected or not self.db.get_bool('limits.enforce', True):
+            self.limit_check_job = None
+            return
+
+        # Check if altitude axis is moving
+        if self.axes_moving.get(2, False):
+            if self.last_valid_alt_deg is not None:
+                alt_min = self.db.get_float('limits.alt_min', -5.0)
+                alt_max = self.db.get_float('limits.alt_max', 90.0)
+
+                # Stop if limits exceeded
+                if self.last_valid_alt_deg >= alt_max or self.last_valid_alt_deg <= alt_min:
+                    self.stop_axis(2)
+                    self.log(f"⚠ Motion stopped at altitude limit")
+
+        # Continue checking if any axis is still moving
+        if any(self.axes_moving.values()):
+            self.limit_check_job = self.root.after(100, self.check_limits_during_motion)
+        else:
+            self.limit_check_job = None
+
     def move(self, direction):
         """Start moving."""
         if not self.connected or self.estop_active:
             return
-        
+
         if direction in ('up', 'down') and not self.check_altitude_limits(direction):
             return
-        
+
         speed = self.speed_var.get()
         self.log(f"Move {direction} @ {speed:.1f}°/s")
-        
+
         axis_map = {'up': (2, True), 'down': (2, False), 'left': (1, False), 'right': (1, True)}
         axis, positive = axis_map[direction]
-        
+
         self.axes_moving[axis] = True
         self.protocol.slew_fixed_rate(str(axis), positive, speed)
+
+        # Start continuous limit checking in momentary mode
+        if self.db.get('controls.mode', 'latching') == 'momentary':
+            self.start_limit_checking()
     
     def stop_axis(self, axis):
         """Stop single axis."""
@@ -1587,14 +1695,19 @@ class TelescopeGUI:
         """Stop all motion."""
         if not self.connected:
             return
-        
+
         self.log("STOP")
         self.protocol.stop_motion('1')
         self.protocol.stop_motion('2')
         self.axes_moving = {1: False, 2: False}
         self.keys_pressed.clear()
         self.estop_active = False
-        
+
+        # Cancel limit checking
+        if self.limit_check_job:
+            self.root.after_cancel(self.limit_check_job)
+            self.limit_check_job = None
+
         if TTKBOOTSTRAP_AVAILABLE:
             self.estop_btn.configure(text="🛑 EMERGENCY STOP", bootstyle="danger")
     
@@ -1642,7 +1755,46 @@ class TelescopeGUI:
             self.alt_status_raw.configure(text=raw_text)
     
     # -------------------- Presets --------------------
-    
+
+    def update_preset_tooltips(self):
+        """Update tooltips for preset buttons with target positions."""
+        if not self.connected or not self.protocol:
+            return
+
+        try:
+            # Get current position
+            current_az = self.protocol.get_position('1')
+            current_alt = self.protocol.get_position('2')
+
+            if current_az is not None and current_alt is not None:
+                current_az_deg = self.protocol.counts_to_degrees(current_az, '1')
+                current_alt_deg = self.protocol.counts_to_degrees(current_alt, '2')
+
+                # Update Home tooltip
+                home_az = self.db.get_float('positions.home_az', 0)
+                home_alt = self.db.get_float('positions.home_alt', 0)
+                if current_az_deg is not None and current_alt_deg is not None:
+                    delta_az = home_az - current_az_deg
+                    delta_alt = home_alt - current_alt_deg
+                    if self.home_tooltip:
+                        self.home_tooltip.update_text(
+                            f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°\n"
+                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        )
+
+                    # Update Stow tooltip
+                    stow_az = self.db.get_float('positions.stow_az', 0)
+                    stow_alt = self.db.get_float('positions.stow_alt', 90)
+                    delta_az = stow_az - current_az_deg
+                    delta_alt = stow_alt - current_alt_deg
+                    if self.stow_tooltip:
+                        self.stow_tooltip.update_text(
+                            f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°\n"
+                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        )
+        except Exception as e:
+            self.file_logger.log(f"Error updating tooltips: {e}", level='DEBUG')
+
     def goto_home(self):
         if not self.connected:
             return
@@ -1662,9 +1814,18 @@ class TelescopeGUI:
             az_deg = self.protocol.counts_to_degrees(az, '1')
             alt_deg = self.protocol.counts_to_degrees(alt, '2')
             if az_deg is not None and alt_deg is not None:
+                # Sanity check positions before saving
+                if not self.is_position_sane(az_deg, False):
+                    self.log("⚠️ Azimuth position out of range, waiting for valid value...")
+                    return
+                if not self.is_position_sane(alt_deg, True):
+                    self.log("⚠️ Altitude position out of range, waiting for valid value...")
+                    return
+
                 self.db.set('positions.home_az', str(az_deg))
                 self.db.set('positions.home_alt', str(alt_deg))
                 self.log(f"HOME set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
+                self.update_preset_tooltips()  # Update tooltips immediately
     
     def goto_stow(self):
         if not self.connected:
@@ -1685,9 +1846,18 @@ class TelescopeGUI:
             az_deg = self.protocol.counts_to_degrees(az, '1')
             alt_deg = self.protocol.counts_to_degrees(alt, '2')
             if az_deg is not None and alt_deg is not None:
+                # Sanity check positions before saving
+                if not self.is_position_sane(az_deg, False):
+                    self.log("⚠️ Azimuth position out of range, waiting for valid value...")
+                    return
+                if not self.is_position_sane(alt_deg, True):
+                    self.log("⚠️ Altitude position out of range, waiting for valid value...")
+                    return
+
                 self.db.set('positions.stow_az', str(az_deg))
                 self.db.set('positions.stow_alt', str(alt_deg))
                 self.log(f"STOW set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
+                self.update_preset_tooltips()  # Update tooltips immediately
     
     def zero_position(self):
         if not self.connected:

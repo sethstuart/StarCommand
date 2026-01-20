@@ -1,3 +1,0 @@
-[console_scripts]
-skywatcher-cli = telescope_control_v2:main
-skywatcher-gui = telescope_gui_v2:main

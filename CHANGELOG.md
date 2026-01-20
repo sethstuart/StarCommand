@@ -15,6 +15,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Position history tracking
 - ASCOM driver integration
 - Multi-language support
+- Position update speed improvements (requires performance profiling)
+- Smart Go To path selection (shortest azimuth route)
+- Command verification with automatic retry logic
+- Merge Comms Log and Diagnostics tabs into unified interface
+
+---
+
+## [0.4.3] - GUI - 2026-01-20
+
+### Added
+- Tooltips on "Go to Home" and "Go to Stow" buttons showing target position and delta movement
+- Sanity checking for Set Home/Stow buttons to prevent saving corrupted position values
+- Limit enforcement in momentary mode with continuous position checking every 100ms
+- Auto-stop when altitude limits reached during motion
+- ToolTip helper class for dynamic tooltip management
+
+### Changed
+- Activity log is now read-only (cannot be typed into)
+- IP and Port fields disabled during active connection to prevent confusion
+- Motion control direction pad elements properly centered in frame
+- Updated all install scripts (install.sh, install.ps1, install.bat) to reference StarCommandGUI.py and StarCommandCLI.py
+- Updated requirements.txt with ttkbootstrap>=1.10.0 as optional dependency
+
+### Fixed
+- ttkbootstrap deprecation warning by updating import chain to try ttkbootstrap.widgets.scrolled first
+- Motion overshoot in momentary mode by implementing continuous limit checking
+- Potential for corrupted position values to be saved as presets
+- Install scripts referencing outdated filenames (telescope_gui_v2.py, telescope_control_v2.py)
 
 ---
 
@@ -173,6 +201,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Application | Date | Key Features |
 |---------|-------------|------|--------------|
+| 0.4.3 | GUI | 2026-01-20 | QOL improvements, tooltips, limit enforcement, read-only log |
+| 0.4.2 | GUI | 2026-01-20 | Separated logging, position sanity checking, comms log tab |
 | 0.4.1 | GUI | 2024-01-20 | Altitude limits, log management, modern themes |
 | 0.4.0 | GUI | 2024-01-15 | SQLite config, control modes, status monitoring |
 | 0.3.1 | GUI | 2024-01-10 | File logging, blocked detection |

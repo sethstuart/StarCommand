@@ -50,8 +50,12 @@ source venv/bin/activate
 echo "Upgrading pip..."
 pip install --upgrade pip > /dev/null 2>&1
 
+# Install dependencies
+echo "Installing dependencies..."
+pip install -r requirements.txt > /dev/null 2>&1
+
 # Install package in development mode
-echo "Installing SkyWatcher Controller..."
+echo "Installing Star Command..."
 pip install -e . > /dev/null 2>&1
 
 echo ""
@@ -65,12 +69,10 @@ echo "1. Activate the virtual environment:"
 echo "   source venv/bin/activate"
 echo ""
 echo "2. Run the GUI:"
-echo "   skywatcher-gui"
-echo "   OR: python3 telescope_gui_v2.py"
+echo "   python StarCommandGUI.py"
 echo ""
 echo "3. Run the CLI:"
-echo "   skywatcher-cli"
-echo "   OR: python3 telescope_control_v2.py"
+echo "   python StarCommandCLI.py [ip] [port]"
 echo ""
 echo "4. When done, deactivate:"
 echo "   deactivate"

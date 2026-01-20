@@ -59,9 +59,14 @@ echo.
 echo Upgrading pip...
 python -m pip install --upgrade pip --quiet
 
+REM Install dependencies
+echo.
+echo Installing dependencies...
+pip install -r requirements.txt --quiet
+
 REM Install package
 echo.
-echo Installing SkyWatcher Controller...
+echo Installing Star Command...
 pip install -e . --quiet
 if errorlevel 1 (
     echo Error: Installation failed
@@ -80,12 +85,10 @@ echo 1. Activate the virtual environment:
 echo    venv\Scripts\activate.bat
 echo.
 echo 2. Run the GUI:
-echo    skywatcher-gui
-echo    OR: python telescope_gui_v2.py
+echo    python StarCommandGUI.py
 echo.
 echo 3. Run the CLI:
-echo    skywatcher-cli
-echo    OR: python telescope_control_v2.py
+echo    python StarCommandCLI.py [ip] [port]
 echo.
 echo 4. When done, deactivate:
 echo    deactivate

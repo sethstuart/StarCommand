@@ -67,8 +67,12 @@ Write-Host "Activating virtual environment..." -ForegroundColor Yellow
 Write-Host "Upgrading pip..." -ForegroundColor Yellow
 python -m pip install --upgrade pip --quiet
 
+# Install dependencies
+Write-Host "Installing dependencies..." -ForegroundColor Yellow
+pip install -r requirements.txt --quiet
+
 # Install package in development mode
-Write-Host "Installing SkyWatcher Controller..." -ForegroundColor Yellow
+Write-Host "Installing Star Command..." -ForegroundColor Yellow
 pip install -e . --quiet
 
 if (-not $?) {
@@ -88,12 +92,10 @@ Write-Host "1. Activate the virtual environment:" -ForegroundColor White
 Write-Host "   .\venv\Scripts\Activate.ps1" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "2. Run the GUI:" -ForegroundColor White
-Write-Host "   skywatcher-gui" -ForegroundColor Yellow
-Write-Host "   OR: python telescope_gui_v2.py" -ForegroundColor Yellow
+Write-Host "   python StarCommandGUI.py" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "3. Run the CLI:" -ForegroundColor White
-Write-Host "   skywatcher-cli" -ForegroundColor Yellow
-Write-Host "   OR: python telescope_control_v2.py" -ForegroundColor Yellow
+Write-Host "   python StarCommandCLI.py [ip] [port]" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "4. When done, deactivate:" -ForegroundColor White
 Write-Host "   deactivate" -ForegroundColor Yellow

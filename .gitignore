@@ -185,3 +185,10 @@ test-output/
 # Old/backup files to ignore
 *.old
 .gitignore.new
+
+# todo file
+todo.md
+
+# Claude
+CLAUDE.md
+CHANGELOG.md

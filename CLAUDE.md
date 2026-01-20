@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-StarCommand is a professional telescope controller for Sky-Watcher Virtuoso GTi 150P mounts. Version 0.4.2 provides both GUI (StarCommandGUI.py) and CLI (StarCommandCLI.py) interfaces for WiFi-based telescope control with SQLite persistence, real-time protocol debugging, and customizable themes.
+StarCommand is a telescope controller for Sky-Watcher Virtuoso GTi dobsonian mounts. Version 0.4.2 provides both GUI (StarCommandGUI.py) and CLI (StarCommandCLI.py) interfaces for WiFi-based telescope control with SQLite persistence, real-time protocol debugging, and customizable themes.
 
 ## Key Commands
 
@@ -36,7 +36,7 @@ python StarCommandGUI.py
 python StarCommandCLI.py [ip] [port]
 
 # After pip install
-starcommand-gui
+starcommand
 starcommand-cli
 ```
 
@@ -195,23 +195,77 @@ GUI implements corruption filtering (lines 1285-1293):
 - Altitude: -90° to +180° (allows some overflow)
 - Rejects wild values from corrupted UDP packets
 
+## Development Workflow Requirements
+
+### When Making Changes
+
+**ALWAYS** update these files after implementing changes:
+
+1. **CHANGELOG.md**:
+   - Add changes to the appropriate version section
+   - Use categories: Added, Changed, Fixed, Removed
+   - Follow semantic versioning (major.minor.patch)
+   - Update version history table at bottom
+   - Include line number references for code changes where applicable
+
+2. **todo.md**:
+   - Mark completed items with [x] and strikethrough
+   - Move completed items to "Completed Tasks" section with version number
+   - Remove items that are no longer relevant
+   - Add new items as they are discovered during development
+   - Use bold for task names and include context/reasoning
+
+3. **Version Bumping**:
+   - Update version in README.md if applicable
+   - Update version in setup.py if applicable
+   - Ensure CHANGELOG.md reflects new version
+   - Update version history table in CHANGELOG.md
+
+### Workflow Example
+
+After implementing a feature or fix:
+1. Make code changes
+2. Update CHANGELOG.md with changes under current/unreleased version
+3. Update todo.md to mark items complete
+4. Test changes
+5. Commit with descriptive message referencing issue/feature
+6. For releases: Update version numbers across all files
+
+### Critical Files to Update
+
+| File | Update Trigger | What to Update |
+|------|----------------|----------------|
+| CHANGELOG.md | Any code change | Add to version section with category |
+| todo.md | Feature/fix completion | Mark complete, move to "Completed Tasks" |
+| README.md | Version release | Update version number and feature list |
+| setup.py | Version release | Update version number |
+
 ## Important Development Notes
 
 ### File Organization
 
 **Current working files:**
-- [StarCommandGUI.py](StarCommandGUI.py) - Primary GUI application (v0.4.2)
+- [StarCommandGUI.py](StarCommandGUI.py) - Primary GUI application (v0.4.3)
 - [StarCommandCLI.py](StarCommandCLI.py) - CLI alternative
 - [logs/](logs/) - Runtime logs with automatic retention
+- [setup.py](setup.py) - Package installation configuration (updated v0.4.3)
 
-**Outdated files to ignore:**
+**Files to ignore/regenerate:**
 - `venv/` - May be out of date, regenerate with install scripts
 - `tools_old/` - Legacy development files
-- `setup.py` - References old module names (`telescope_gui_v2`, `telescope_control_v2`)
+- `*.egg-info/` - Build artifacts, automatically generated
 
 ### Version History
 
-**v0.4.2 (current):**
+**v0.4.3 (current):**
+- QOL improvements: tooltips, read-only log, disabled connection fields
+- Limit enforcement in momentary mode with auto-stop
+- Sanity checks for preset buttons
+- Motion control centering
+- Fixed ttkbootstrap deprecation warning
+- Updated install scripts and setup.py
+
+**v0.4.2:**
 - Fixed activity log flooding
 - Separated UI vs protocol logging
 - Position sanity checking for corrupted packets
