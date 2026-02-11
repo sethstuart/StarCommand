@@ -195,6 +195,177 @@ GUI implements corruption filtering (lines 1285-1293):
 - Altitude: -90° to +180° (allows some overflow)
 - Rejects wild values from corrupted UDP packets
 
+### Common Protocol Pitfalls
+
+1. **Axis Parameter Inconsistency**
+   - Some code uses '1'/'2' (string)
+   - Some code uses AXIS_AZ/AXIS_ALT constants
+   - **Always check both** when writing conditionals:
+   ```python
+   if axis == self.AXIS_ALT or axis == '2':
+   ```
+
+2. **Position Offset Confusion**
+   - Raw positions are signed 24-bit integers
+   - Protocol transmits as unsigned with 0x800000 offset
+   - **Always add offset before sending, subtract after receiving**
+   - **Never** use raw count value directly in calculations
+
+3. **LSB-First Encoding**
+   - Hex values must be byte-reversed
+   - Example: 0x123456 → "563412"
+   - Use `format_hex_data()` method, never manual string concatenation
+
+4. **Direction Bit Confusion**
+   - set_motion_mode() has TWO direction parameters
+   - `direction_cw` in function parameter (True = clockwise)
+   - Direction bit in mode byte (different encoding)
+   - **Always use the method, never construct mode byte manually**
+
+5. **Command vs Response Termination**
+   - Commands MUST end with '\r' (carriage return)
+   - Responses include '\r' which must be stripped
+   - Some responses include '=' prefix, some don't
+   - **Always check response format** before parsing
+
+## Known Bugs & Limitations
+
+### Critical Issues Requiring Attention
+
+1. **Azimuth Limit Checking Missing** (HIGH PRIORITY)
+   - **Issue**: Altitude limits are enforced (lines 1905-1927, 1931-1953) but azimuth has NO limit checking
+   - **Impact**: Mount can rotate indefinitely, potentially wrapping cables
+   - **Location**: [StarCommandGUI.py:1905-1953](StarCommandGUI.py#L1905-L1953)
+   - **Required Fix**: Implement `check_azimuth_limits()` similar to `check_altitude_limits()`
+   - **Safety Risk**: Cable damage, mount damage
+
+2. **Goto Verification Inconsistency**
+   - **Issue**: GotoTracker verifies completion but may have logic errors in wrap-around calculation
+   - **Location**: [StarCommandGUI.py:472-596](StarCommandGUI.py#L472-L596)
+   - **Reported Symptom**: "Shortest move calculations still seem to be failing"
+   - **Test Required**: Manual testing of goto operations across 0°/360° boundary
+
+3. **Shortest Path Calculation Uncertainty**
+   - **Issue**: goto_position() implements shortest path (lines 822-839) but effectiveness unclear
+   - **Location**: [StarCommandGUI.py:816-849](StarCommandGUI.py#L816-L849)
+   - **Formula**:
+     ```python
+     cw_distance = (target_deg - current_deg) % 360
+     ccw_distance = (current_deg - target_deg) % 360
+     direction_cw = cw_distance <= ccw_distance
+     ```
+   - **Action Required**: Verify calculation logic is correct for all edge cases
+
+4. **Error Handling Asymmetry**
+   - **Issue**: Altitude moves have failure checking, azimuth moves do not
+   - **Impact**: Azimuth failures may go undetected
+   - **Required**: Implement equivalent error detection for azimuth axis
+
+### Performance Issues
+
+1. **UI Responsiveness** (Partially addressed in v0.4.4)
+   - **Issue**: Keypresses can be missed in momentary mode, tab switching has delays
+   - **Status**: Position query optimization improved latency by 60-70% but more work needed
+   - **Remaining Work**: Profile event loop, identify remaining bottlenecks
+
+### CLI vs GUI Feature Parity
+
+1. **StarCommandCLI.py Outdated**
+   - **Issue**: CLI lacks many GUI improvements from v0.4.x
+   - **Missing Features**: Limit enforcement, goto verification, position caching
+   - **Action Required**: Comprehensive CLI review and update
+
+## Code Review Guidelines
+
+### Before Implementing ANY Feature
+
+1. **Read Existing Code First**
+   - Understand current implementation
+   - Check for similar patterns elsewhere
+   - Review related classes/methods
+   - Check CHANGELOG.md for historical context
+
+2. **Identify Safety Implications**
+   - Does this control motor movement?
+   - Can this cause cable wrapping?
+   - Could this damage hardware?
+   - Does this bypass safety limits?
+
+3. **Check Symmetry**
+   - **CRITICAL**: If implementing for azimuth, also implement for altitude (and vice versa)
+   - Example: Altitude has limit checking → azimuth MUST also have limit checking
+   - Example: Goto verification for one axis → must verify BOTH axes
+
+4. **Consider Error Cases**
+   - What if UDP packet is lost?
+   - What if position value is corrupted?
+   - What if mount is blocked/stalled?
+   - What if user disconnects during operation?
+
+### Code Quality Standards
+
+#### Comments Required For:
+1. **All Protocol Commands**
+   ```python
+   # Send goto target position: :S<axis><24-bit position with LSB-first encoding>
+   # Position is offset by 0x800000 to represent signed values
+   response = self.send_command(f":S{axis}{hex_target}")
+   ```
+
+2. **All Safety-Critical Logic**
+   ```python
+   # SAFETY: Stop altitude motion if limit reached to prevent cable wrapping
+   if self.last_valid_alt_deg >= alt_max or self.last_valid_alt_deg <= alt_min:
+       self.stop_axis(2)
+   ```
+
+3. **All Calculations**
+   ```python
+   # Calculate shortest azimuth path:
+   # CW distance: (target - current) mod 360
+   # CCW distance: (current - target) mod 360
+   # Choose direction with smaller distance
+   cw_distance = (target_deg - current_deg) % 360
+   ccw_distance = (current_deg - target_deg) % 360
+   direction_cw = cw_distance <= ccw_distance
+   ```
+
+4. **All Magic Numbers**
+   ```python
+   self.tolerance_deg = 0.5  # Within 0.5° = successful goto completion
+   self.timeout_sec = 120    # 2 minutes max for goto operations
+   ```
+
+#### Naming Conventions
+
+- Use descriptive names: `check_altitude_limits()` not `check_lim()`
+- Match existing patterns: `goto_position()` not `go_to_pos()`
+- Axis references: Use `axis` parameter, check for both '1'/'2' and AXIS_AZ/AXIS_ALT
+- Degree vs count: Suffix variables with `_deg` or `_counts` for clarity
+
+### Refactoring Priorities
+
+1. **Extract Duplicate Code**
+   - Position querying (azimuth vs altitude) - DONE in v0.4.4
+   - Limit checking (create unified `check_axis_limits(axis, direction)`)
+   - Preset button handling (home vs stow nearly identical)
+
+2. **Improve Separation of Concerns**
+   - Protocol layer should not know about GUI
+   - GUI should not construct protocol commands directly
+   - Configuration should be injectable, not global
+
+3. **Add Type Hints**
+   ```python
+   def goto_position(self, axis: str, target_position: int) -> bool:
+       """Goto specific position with shortest path calculation."""
+   ```
+
+4. **Reduce Nesting Depth**
+   - Current: Up to 5-6 levels in some methods
+   - Target: Maximum 3 levels
+   - Use early returns, extract methods
+
 ## Development Workflow Requirements
 
 ### When Making Changes
@@ -224,12 +395,60 @@ GUI implements corruption filtering (lines 1285-1293):
 ### Workflow Example
 
 After implementing a feature or fix:
-1. Make code changes
-2. Update CHANGELOG.md with changes under current/unreleased version
-3. Update todo.md to mark items complete
-4. Test changes
-5. Commit with descriptive message referencing issue/feature
+1. Make code changes with proper comments
+2. **Test changes** (manual testing checklist - see Testing & QA section)
+3. Update CHANGELOG.md with changes under current/unreleased version
+4. Update todo.md to mark items complete
+5. Commit with descriptive message (see format below)
 6. For releases: Update version numbers across all files
+
+### Commit Message Format
+
+```
+<type>: <short summary>
+
+<detailed description>
+
+Testing:
+- <test performed>
+- <test result>
+
+Related: <related issues/PRs>
+```
+
+Types: `feat`, `fix`, `refactor`, `docs`, `test`, `perf`, `style`
+
+Example:
+```
+fix: Add azimuth limit checking symmetry with altitude
+
+Implemented check_azimuth_limits() to prevent cable wrapping.
+Uses same logic as check_altitude_limits() for consistency.
+
+Testing:
+- Tested azimuth movement near 0°/360° boundary
+- Verified auto-stop at configured limits
+- Confirmed behavior matches altitude axis
+
+Related: todo.md known bugs section
+```
+
+### Pre-Commit Verification
+
+Before committing, verify:
+```bash
+# Review your changes
+git diff
+
+# Check for debug code, commented lines, TODO markers
+grep -r "TODO\|FIXME\|XXX\|DEBUG" StarCommand*.py
+
+# Verify no accidental file inclusions
+git status
+
+# Check for trailing whitespace, syntax errors
+python -m py_compile StarCommand*.py
+```
 
 ### Critical Files to Update
 
@@ -336,6 +555,116 @@ grep "SEND\|RECV" logs/telescope_control_*.log | less
 **Wild position values:**
 1. Check Comms Log for malformed responses
 2. Sanity checker should filter (see logs for "rejected position")
+
+### Testing & Quality Assurance
+
+#### Current State
+**NO AUTOMATED TESTS EXIST**
+
+This is a critical gap. The codebase has NO test suite despite controlling physical hardware with safety implications.
+
+#### Manual Testing Checklist
+
+Before ANY release or significant change:
+
+**Azimuth Tests:**
+- [ ] Goto across 0°/360° boundary (e.g., 350° → 10°)
+- [ ] Verify shortest path taken (should move 20° CW, not 340° CCW)
+- [ ] Test both CW and CCW movements
+- [ ] Verify goto completion notification
+- [ ] Test azimuth limits once implemented
+
+**Altitude Tests:**
+- [ ] Approach minimum limit (default -5°)
+- [ ] Verify auto-stop when limit reached
+- [ ] Approach maximum limit (default 90°)
+- [ ] Verify auto-stop when limit reached
+- [ ] Test in both momentary and latching modes
+
+**Limit Enforcement Tests:**
+- [ ] Enable limits, attempt to exceed → should stop
+- [ ] Disable limits, verify movement unrestricted
+- [ ] Test momentary mode limit checking (100ms polling)
+- [ ] Test latching mode limit checking
+
+**Goto Verification Tests:**
+- [ ] Short distance goto (within 10°)
+- [ ] Long distance goto (>180°)
+- [ ] Verify "Goto completed" notification appears
+- [ ] Interrupt goto mid-movement, verify timeout/cancellation
+- [ ] Test goto across 0°/360° boundary
+
+**Position Display Tests:**
+- [ ] Enable auto-update, verify smooth updates
+- [ ] Check all display formats (degrees, raw, both)
+- [ ] Verify position sanity checking filters bad values
+- [ ] Test update rate changes (0.1 Hz to 10 Hz)
+
+**Performance Tests:**
+- [ ] Rapid keypresses in momentary mode (should not miss inputs)
+- [ ] Tab switching responsiveness (should be immediate)
+- [ ] Settings changes responsiveness
+- [ ] Monitor position query latency (<60ms typical)
+
+**Protocol Tests:**
+- [ ] Enable protocol logging, verify commands are correct
+- [ ] Check LSB-first encoding in Comms Log
+- [ ] Verify position offset (0x800000) applied correctly
+- [ ] Test network timeout handling (disconnect mount temporarily)
+
+#### Required Testing Framework (Future Work)
+
+**Unit Tests Needed:**
+1. Protocol Layer (`SkyWatcherProtocol`)
+   - Command formatting (LSB-first hex encoding)
+   - Response parsing (position decoding, status bits)
+   - Degree/count conversions
+   - Shortest path calculations (CRITICAL)
+   - Wrap-around logic at 0°/360° boundary
+
+2. Configuration Layer (`DatabaseConfig`)
+   - Setting persistence and retrieval
+   - Type conversions (int, float, bool)
+   - Default value handling
+
+3. Goto Verification (`GotoTracker`)
+   - Completion detection
+   - Timeout handling
+   - Wrap-around position comparison
+
+**Integration Tests Needed:**
+1. Mock Hardware Tests
+   - Create UDP server simulator mimicking mount behavior
+   - Test command sequences without physical hardware
+   - Verify initialization sequence
+   - Test limit enforcement logic
+
+2. Safety Tests (CRITICAL)
+   - Altitude limit enforcement
+   - Azimuth limit enforcement (once implemented)
+   - Emergency stop functionality
+   - Position sanity checking
+
+3. Edge Cases
+   - 0°/360° azimuth boundary
+   - Negative altitude values
+   - Maximum rotation limits
+   - Network timeout scenarios
+   - Corrupted packet handling
+
+#### Test Data for Shortest Path Validation
+
+Expected results for goto direction selection:
+```python
+test_cases = [
+    {"current": 10, "target": 350, "expected_dir": "CCW", "expected_dist": 20},
+    {"current": 350, "target": 10, "expected_dir": "CW", "expected_dist": 20},
+    {"current": 0, "target": 180, "expected_dir": "CW", "expected_dist": 180},
+    {"current": 180, "target": 0, "expected_dir": "CW", "expected_dist": 180},
+    {"current": 45, "target": 315, "expected_dir": "CCW", "expected_dist": 90},
+    {"current": 315, "target": 45, "expected_dir": "CW", "expected_dist": 90},
+]
+```
 
 ## Related Documentation
 

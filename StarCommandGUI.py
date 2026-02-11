@@ -3,7 +3,7 @@
 Sky-Watcher Virtuoso GTi 150P Professional Controller
 Full-featured GUI with configurable settings, themes, and keyboard controls
 
-Version: 0.4.2
+Version: 0.4.4
 
 CHANGELOG v0.4.2:
   - FIXED: Activity log no longer floods with protocol traffic
@@ -65,7 +65,7 @@ else:
 
 from tkinter import messagebox
 
-VERSION = "0.4.2"
+VERSION = "0.4.4"
 DEFAULT_THEME = "darkly"
 
 # Valid ttkbootstrap themes (verified to exist)
@@ -126,8 +126,8 @@ class ToolTip:
 
 
 class DatabaseConfig:
-    """SQLite-based configuration manager."""
-    
+    """SQLite-based configuration manager with connection pooling and caching."""
+
     DEFAULT_SETTINGS = {
         'connection.ip': '192.168.4.1',
         'connection.port': '11880',
@@ -159,17 +159,31 @@ class DatabaseConfig:
         'logging.retention': '30',
         'logging.show_protocol': 'False',  # Show protocol in Comms Log tab
     }
-    
+
     def __init__(self, db_path: Path = None):
         if db_path is None:
             config_dir = Path.home() / '.skywatcher_controller'
             config_dir.mkdir(exist_ok=True)
             db_path = config_dir / 'settings.db'
-        
+
         self.db_path = db_path
+
+        # Persistent connection with thread safety
+        self._conn = None
+        self._conn_lock = threading.Lock()
+
+        # Two-tier cache for performance
+        self._hot_cache = {}   # Rarely changes (limits, modes) - no lock needed after init
+        self._warm_cache = {}  # Sometimes changes (presets, themes) - requires lock
+        self._cache_lock = threading.Lock()
+
+        # Initialize database and connection
         self._init_database()
-    
+        self._init_connection()
+        self._populate_hot_cache()
+
     def _init_database(self):
+        """Initialize database schema with default values."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
@@ -182,43 +196,113 @@ class DatabaseConfig:
             cursor.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, value))
         conn.commit()
         conn.close()
-    
+
+    def _init_connection(self):
+        """Initialize persistent database connection."""
+        self._conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False  # Allow multi-threaded access with explicit locking
+        )
+
+    def _populate_hot_cache(self):
+        """Pre-load frequently accessed, rarely changed settings into hot cache."""
+        hot_keys = [
+            'limits.enforce', 'limits.alt_min', 'limits.alt_max',
+            'controls.mode', 'display.position_format',
+            'display.show_positions', 'display.update_rate'
+        ]
+
+        with self._conn_lock:
+            cursor = self._conn.cursor()
+            for key in hot_keys:
+                cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+                row = cursor.fetchone()
+                if row:
+                    self._hot_cache[key] = row[0]
+                else:
+                    self._hot_cache[key] = self.DEFAULT_SETTINGS.get(key)
+
     def get(self, key: str, default=None):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
-        row = cursor.fetchone()
-        conn.close()
-        if row:
-            return row[0]
-        return default if default is not None else self.DEFAULT_SETTINGS.get(key)
-    
+        """Get value with cache-first pattern."""
+        # Check hot cache first (no lock - read-only after init)
+        if key in self._hot_cache:
+            return self._hot_cache[key]
+
+        # Check warm cache with lock
+        with self._cache_lock:
+            if key in self._warm_cache:
+                return self._warm_cache[key]
+
+        # Query database with persistent connection
+        with self._conn_lock:
+            cursor = self._conn.cursor()
+            cursor.execute('SELECT value FROM settings WHERE key = ?', (key,))
+            row = cursor.fetchone()
+
+        value = row[0] if row else (default if default is not None else self.DEFAULT_SETTINGS.get(key))
+
+        # Add to warm cache for future access
+        with self._cache_lock:
+            self._warm_cache[key] = value
+
+        return value
+
     def get_int(self, key: str, default: int = 0) -> int:
+        """Get integer value from cache or database."""
         value = self.get(key)
         try:
             return int(value) if value else default
         except ValueError:
             return default
-    
+
     def get_float(self, key: str, default: float = 0.0) -> float:
+        """Get float value from cache or database."""
         value = self.get(key)
         try:
             return float(value) if value else default
         except ValueError:
             return default
-    
+
     def get_bool(self, key: str, default: bool = False) -> bool:
+        """Get boolean value from cache or database."""
         value = self.get(key)
         if value is None:
             return default
         return value.lower() in ('true', '1', 'yes')
-    
+
     def set(self, key: str, value):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, str(value)))
-        conn.commit()
-        conn.close()
+        """Set value and invalidate cache."""
+        try:
+            with self._conn_lock:
+                cursor = self._conn.cursor()
+                cursor.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)',
+                             (key, str(value)))
+                self._conn.commit()
+
+            # Invalidate caches
+            with self._cache_lock:
+                if key in self._hot_cache:
+                    self._hot_cache[key] = str(value)
+                self._warm_cache[key] = str(value)
+        except Exception:
+            # Silent failure - database writes are not critical
+            pass
+
+    def invalidate_cache(self, key: str = None):
+        """Invalidate cache for specific key or all keys."""
+        with self._cache_lock:
+            if key:
+                self._warm_cache.pop(key, None)
+                # Hot cache only invalidated via set()
+            else:
+                self._warm_cache.clear()
+
+    def close(self):
+        """Close persistent connection."""
+        if self._conn:
+            with self._conn_lock:
+                self._conn.close()
+                self._conn = None
 
 
 class FileLogger:
@@ -442,12 +526,12 @@ class StatusMonitor:
                             raw = status.get('raw', 0)
                             old = self._last_status.get(axis)
                             
-                            # Log status changes to file
+                            # Log status changes to file (DEBUG level to reduce log spam)
                             if old is not None and raw != old and self.file_logger:
                                 axis_name = "Azimuth" if axis == 1 else "Altitude"
                                 self.file_logger.log(
                                     f"{axis_name} status: 0x{old:02X} -> 0x{raw:02X}",
-                                    level='STATUS'
+                                    level='DEBUG'
                                 )
                             
                             self._last_status[axis] = raw
@@ -529,9 +613,9 @@ class GotoTracker:
 
             # Calculate error
             error = abs(current_deg - target_deg)
-            # Handle wrap-around for azimuth
+            # Handle wrap-around for azimuth (shortest angular distance)
             if axis == '1' or axis == 1:
-                error = min(error, abs(error - 360), abs(error + 360))
+                error = min(error, 360 - error)
 
             if error <= self.tolerance_deg:
                 self._handle_success(axis, goto_info, current_deg)
@@ -819,17 +903,35 @@ class SkyWatcherProtocol:
         if current_deg is None or target_deg is None or axis == self.AXIS_ALT or axis == '2':
             # Fallback to old logic if conversion fails or for altitude axis
             direction_cw = target_position > current
+            if self.file_logger:
+                axis_name = "Altitude" if (axis == self.AXIS_ALT or axis == '2') else "Azimuth"
+                self.file_logger.log(
+                    f"Goto {axis_name}: Using simple direction (target > current = {direction_cw})",
+                    level='DEBUG'
+                )
         else:
             # Normalize to 0-360 range for azimuth
-            current_deg = current_deg % 360
-            target_deg = target_deg % 360
+            current_normalized = current_deg % 360
+            target_normalized = target_deg % 360
 
             # Calculate both directions
-            cw_distance = (target_deg - current_deg) % 360
-            ccw_distance = (current_deg - target_deg) % 360
+            # CW distance: How far to go clockwise from current to target
+            # CCW distance: How far to go counter-clockwise from current to target
+            cw_distance = (target_normalized - current_normalized) % 360
+            ccw_distance = (current_normalized - target_normalized) % 360
 
             # Choose shorter path (CW wins on tie)
             direction_cw = cw_distance <= ccw_distance
+
+            # Debug logging for shortest path calculation
+            if self.file_logger:
+                self.file_logger.log(
+                    f"Goto Azimuth shortest path: current={current_normalized:.2f}°, "
+                    f"target={target_normalized:.2f}°, "
+                    f"CW_dist={cw_distance:.2f}°, CCW_dist={ccw_distance:.2f}°, "
+                    f"chosen={'CW' if direction_cw else 'CCW'}",
+                    level='INFO'
+                )
 
         if not self.set_motion_mode(axis, goto_mode=True, direction_cw=direction_cw):
             return False
@@ -887,7 +989,14 @@ class TelescopeGUI:
         
         # Comms buffer for protocol logging
         self.comms_buffer = CommsBuffer(maxlen=10000)
-        
+
+        # Comms buffer batching to reduce UI event flooding
+        self._comms_update_pending = False
+        self._comms_queue = []
+
+        # Debouncing for settings
+        self._speed_save_job = None
+
         # Protocol
         self.protocol = None
         self.connected = False
@@ -909,6 +1018,19 @@ class TelescopeGUI:
         }
         self._refresh_preset_cache()
 
+        # Performance: Cache limit values for motion checking (eliminates 30+ DB queries/sec)
+        self._cached_limits = {
+            'enforce': True,
+            'alt_min': -5.0,
+            'alt_max': 90.0,
+            'mode': 'latching'
+        }
+        self._refresh_limit_cache()
+
+        # Performance: Cache position display format and label references (eliminates repeated queries)
+        self._cached_pos_format = 'both'
+        self._position_labels = {}  # Store label widget references by format
+
         # State
         self.axes_moving = {1: False, 2: False}
         self.keys_pressed = set()
@@ -925,6 +1047,7 @@ class TelescopeGUI:
         
         # Build GUI
         self.create_widgets()
+        self.update_preset_tooltips()  # Initialize tooltips with database values
         self.bind_keyboard_controls()
         self.start_position_updates()
     
@@ -1333,7 +1456,7 @@ class TelescopeGUI:
         limits_frame.pack(fill='x', pady=10)
         
         self.enforce_limits_var = tk.BooleanVar(value=self.db.get_bool('limits.enforce', True))
-        ttk.Checkbutton(limits_frame, text="Enforce altitude limits", variable=self.enforce_limits_var).pack(anchor='w')
+        ttk.Checkbutton(limits_frame, text="Enforce altitude limits", variable=self.enforce_limits_var).pack(anchor='w', pady=(0, 5))
         
         min_frame = ttk.Frame(limits_frame)
         min_frame.pack(fill='x', pady=5)
@@ -1352,7 +1475,7 @@ class TelescopeGUI:
         self.alt_max_label = ttk.Label(max_frame, text=f"{self.alt_max_var.get():.1f}°", width=6)
         self.alt_max_label.pack(side='left')
         self.alt_max_var.trace_add('write', lambda *a: self.alt_max_label.configure(text=f"{self.alt_max_var.get():.1f}°"))
-        
+
         # Key bindings
         if TTKBOOTSTRAP_AVAILABLE:
             kb_frame = ttk.Labelframe(frame, text="Key Bindings", padding=10, bootstyle="secondary")
@@ -1541,40 +1664,44 @@ class TelescopeGUI:
     # -------------------- Position Display --------------------
     
     def create_position_labels(self):
-        """Create position labels."""
+        """Create position labels and cache references."""
         for w in self.pos_display_frame.winfo_children():
             w.destroy()
-        
+
+        # Clear label cache
+        self._position_labels = {}
+
         if not self.show_pos_var.get():
             return
-        
+
         fmt = self.pos_format_var.get()
+        self._cached_pos_format = fmt  # Cache format selection
         font = ('Consolas', 11)
-        
+
         if fmt == 'degrees':
             ttk.Label(self.pos_display_frame, text="Az:").grid(row=0, column=0, sticky='e', pady=3)
-            self.az_deg_label = ttk.Label(self.pos_display_frame, text="---°", font=font)
-            self.az_deg_label.grid(row=0, column=1, sticky='w', padx=5)
+            self._position_labels['az_deg'] = ttk.Label(self.pos_display_frame, text="---°", font=font)
+            self._position_labels['az_deg'].grid(row=0, column=1, sticky='w', padx=5)
             ttk.Label(self.pos_display_frame, text="Alt:").grid(row=1, column=0, sticky='e', pady=3)
-            self.alt_deg_label = ttk.Label(self.pos_display_frame, text="---°", font=font)
-            self.alt_deg_label.grid(row=1, column=1, sticky='w', padx=5)
+            self._position_labels['alt_deg'] = ttk.Label(self.pos_display_frame, text="---°", font=font)
+            self._position_labels['alt_deg'].grid(row=1, column=1, sticky='w', padx=5)
         elif fmt == 'raw':
             ttk.Label(self.pos_display_frame, text="Az:").grid(row=0, column=0, sticky='e', pady=3)
-            self.az_raw_label = ttk.Label(self.pos_display_frame, text="---", font=font)
-            self.az_raw_label.grid(row=0, column=1, sticky='w', padx=5)
+            self._position_labels['az_raw'] = ttk.Label(self.pos_display_frame, text="---", font=font)
+            self._position_labels['az_raw'].grid(row=0, column=1, sticky='w', padx=5)
             ttk.Label(self.pos_display_frame, text="Alt:").grid(row=1, column=0, sticky='e', pady=3)
-            self.alt_raw_label = ttk.Label(self.pos_display_frame, text="---", font=font)
-            self.alt_raw_label.grid(row=1, column=1, sticky='w', padx=5)
+            self._position_labels['alt_raw'] = ttk.Label(self.pos_display_frame, text="---", font=font)
+            self._position_labels['alt_raw'].grid(row=1, column=1, sticky='w', padx=5)
         elif fmt == 'both':
             ttk.Label(self.pos_display_frame, text="Az:").grid(row=0, column=0, sticky='e', pady=3)
-            self.az_both_label = ttk.Label(self.pos_display_frame, text="---", font=font)
-            self.az_both_label.grid(row=0, column=1, sticky='w', padx=5)
+            self._position_labels['az_both'] = ttk.Label(self.pos_display_frame, text="---", font=font)
+            self._position_labels['az_both'].grid(row=0, column=1, sticky='w', padx=5)
             ttk.Label(self.pos_display_frame, text="Alt:").grid(row=1, column=0, sticky='e', pady=3)
-            self.alt_both_label = ttk.Label(self.pos_display_frame, text="---", font=font)
-            self.alt_both_label.grid(row=1, column=1, sticky='w', padx=5)
+            self._position_labels['alt_both'] = ttk.Label(self.pos_display_frame, text="---", font=font)
+            self._position_labels['alt_both'].grid(row=1, column=1, sticky='w', padx=5)
         elif fmt == 'coordinates':
-            self.coord_label = ttk.Label(self.pos_display_frame, text="---", font=font, justify='left')
-            self.coord_label.pack(pady=10)
+            self._position_labels['coord'] = ttk.Label(self.pos_display_frame, text="---", font=font, justify='left')
+            self._position_labels['coord'].pack(pady=10)
     
     def is_position_sane(self, deg: float, is_altitude: bool = False) -> bool:
         """Check if position value is sane (not corrupted)."""
@@ -1588,7 +1715,10 @@ class TelescopeGUI:
     def start_position_updates(self):
         """Start position update timer."""
         self.update_position_display()
-        self.root.after(1000, self.start_position_updates)
+        # Use configurable update rate (Hz) to determine interval (ms)
+        update_rate = max(0.1, self.update_rate_var.get())  # Minimum 0.1 Hz
+        interval_ms = int(1000 / update_rate)
+        self.root.after(interval_ms, self.start_position_updates)
     
     def update_position_display(self):
         """Update position display with sanity checking."""
@@ -1629,27 +1759,28 @@ class TelescopeGUI:
                 if alt_deg is None:
                     return
             
-            # Update display
-            fmt = self.pos_format_var.get()
-            
+            # Update display using cached format - NO variable query
+            fmt = self._cached_pos_format
+
+            # Use label dictionary - NO hasattr() checks
             if fmt == 'degrees':
-                if hasattr(self, 'az_deg_label'):
-                    self.az_deg_label.configure(text=f"{az_deg:.4f}°")
-                if hasattr(self, 'alt_deg_label'):
-                    self.alt_deg_label.configure(text=f"{alt_deg:.4f}°")
+                if 'az_deg' in self._position_labels:
+                    self._position_labels['az_deg'].configure(text=f"{az_deg:.4f}°")
+                if 'alt_deg' in self._position_labels:
+                    self._position_labels['alt_deg'].configure(text=f"{alt_deg:.4f}°")
             elif fmt == 'raw':
-                if hasattr(self, 'az_raw_label'):
-                    self.az_raw_label.configure(text=f"{az_pos:,}")
-                if hasattr(self, 'alt_raw_label'):
-                    self.alt_raw_label.configure(text=f"{alt_pos:,}")
+                if 'az_raw' in self._position_labels:
+                    self._position_labels['az_raw'].configure(text=f"{az_pos:,}")
+                if 'alt_raw' in self._position_labels:
+                    self._position_labels['alt_raw'].configure(text=f"{alt_pos:,}")
             elif fmt == 'both':
-                if hasattr(self, 'az_both_label'):
-                    self.az_both_label.configure(text=f"{az_deg:.2f}° ({az_pos:,})")
-                if hasattr(self, 'alt_both_label'):
-                    self.alt_both_label.configure(text=f"{alt_deg:.2f}° ({alt_pos:,})")
+                if 'az_both' in self._position_labels:
+                    self._position_labels['az_both'].configure(text=f"{az_deg:.2f}° ({az_pos:,})")
+                if 'alt_both' in self._position_labels:
+                    self._position_labels['alt_both'].configure(text=f"{alt_deg:.2f}° ({alt_pos:,})")
             elif fmt == 'coordinates':
-                if hasattr(self, 'coord_label'):
-                    self.coord_label.configure(text=f"Az: {az_deg % 360:.4f}°\nAlt: {alt_deg:.4f}°")
+                if 'coord' in self._position_labels:
+                    self._position_labels['coord'].configure(text=f"Az: {az_deg % 360:.4f}°\nAlt: {alt_deg:.4f}°")
 
             # Update preset button tooltips with current position (pass values to avoid re-querying)
             self.update_preset_tooltips(az_deg, alt_deg)
@@ -1664,10 +1795,16 @@ class TelescopeGUI:
         entry = f"[{timestamp}] {message}"
 
         # Temporarily enable editing to insert log entry, then disable
-        self.log_text.configure(state='normal')
-        self.log_text.insert('end', entry + "\n")
-        self.log_text.see('end')
-        self.log_text.configure(state='disabled')
+        # For ttkbootstrap ScrolledText, access the internal text widget
+        if TTKBOOTSTRAP_AVAILABLE:
+            text_widget = self.log_text.text
+        else:
+            text_widget = self.log_text
+
+        text_widget.configure(state='normal')
+        text_widget.insert('end', entry + "\n")
+        text_widget.see('end')
+        text_widget.configure(state='disabled')
 
         self.file_logger.log(message, level=level)
     
@@ -1685,9 +1822,15 @@ class TelescopeGUI:
     
     def clear_activity_log(self):
         """Clear activity log."""
-        self.log_text.configure(state='normal')
-        self.log_text.delete('1.0', 'end')
-        self.log_text.configure(state='disabled')
+        # For ttkbootstrap ScrolledText, access the internal text widget
+        if TTKBOOTSTRAP_AVAILABLE:
+            text_widget = self.log_text.text
+        else:
+            text_widget = self.log_text
+
+        text_widget.configure(state='normal')
+        text_widget.delete('1.0', 'end')
+        text_widget.configure(state='disabled')
     
     # -------------------- Comms Log --------------------
     
@@ -1702,25 +1845,38 @@ class TelescopeGUI:
             self.comms_buffer.unregister_callback(self.on_comms_entry)
     
     def on_comms_entry(self, entry):
-        """Handle new comms entry."""
+        """Handle new comms entry (batched to reduce UI event flooding)."""
         if not self.show_protocol_var.get():
             return
-        
-        def update():
-            if TTKBOOTSTRAP_AVAILABLE:
+
+        # Batch entries to reduce UI events from 40+/sec to ~5/sec
+        self._comms_queue.append(entry)
+
+        if not self._comms_update_pending:
+            self._comms_update_pending = True
+            self.root.after(200, self._flush_comms_updates)  # Batch every 200ms
+
+    def _flush_comms_updates(self):
+        """Flush batched comms log entries to UI."""
+        entries_to_add = self._comms_queue[:]
+        self._comms_queue.clear()
+        self._comms_update_pending = False
+
+        # Update widget once with all batched entries
+        if TTKBOOTSTRAP_AVAILABLE:
+            for entry in entries_to_add:
                 self.comms_text.insert('end', entry + "\n")
-                if self.comms_autoscroll_var.get():
-                    self.comms_text.see('end')
-            else:
-                self.comms_text.configure(state='normal')
+            if self.comms_autoscroll_var.get():
+                self.comms_text.see('end')
+        else:
+            self.comms_text.configure(state='normal')
+            for entry in entries_to_add:
                 self.comms_text.insert('end', entry + "\n")
-                if self.comms_autoscroll_var.get():
-                    self.comms_text.see('end')
-                self.comms_text.configure(state='disabled')
-            
-            self.comms_stats_label.configure(text=f"Entries: {len(self.comms_buffer.buffer)}")
-        
-        self.root.after(0, update)
+            if self.comms_autoscroll_var.get():
+                self.comms_text.see('end')
+            self.comms_text.configure(state='disabled')
+
+        self.comms_stats_label.configure(text=f"Entries: {len(self.comms_buffer.buffer)}")
     
     def search_comms(self):
         """Search comms log."""
@@ -1798,6 +1954,7 @@ class TelescopeGUI:
                 self.status_label.configure(text="● Disconnected", foreground="red")
 
             self.log("Disconnected")
+            self.update_preset_tooltips()  # Update tooltips to show only target positions
         else:
             ip = self.ip_entry.get()
             port = int(self.port_entry.get())
@@ -1859,23 +2016,25 @@ class TelescopeGUI:
     # -------------------- Motion Control --------------------
     
     def check_altitude_limits(self, direction):
-        """Check if movement would violate limits."""
-        if not self.db.get_bool('limits.enforce', True):
+        """Check if movement would violate limits (uses cached values)."""
+        # Use cached enforcement setting instead of querying DB
+        if not self._cached_limits['enforce']:
             return True
-        
+
         if self.last_valid_alt_deg is None:
             return True
-        
-        alt_min = self.db.get_float('limits.alt_min', -5.0)
-        alt_max = self.db.get_float('limits.alt_max', 90.0)
-        
+
+        # Use cached limit values instead of querying DB
+        alt_min = self._cached_limits['alt_min']
+        alt_max = self._cached_limits['alt_max']
+
         if direction == 'up' and self.last_valid_alt_deg >= alt_max:
             self.log(f"⚠ Altitude limit ({alt_max}°)")
             return False
         elif direction == 'down' and self.last_valid_alt_deg <= alt_min:
             self.log(f"⚠ Altitude limit ({alt_min}°)")
             return False
-        
+
         return True
 
     def start_limit_checking(self):
@@ -1885,16 +2044,18 @@ class TelescopeGUI:
         self.limit_check_job = self.root.after(100, self.check_limits_during_motion)
 
     def check_limits_during_motion(self):
-        """Continuously check limits during motion in momentary mode."""
-        if not self.connected or not self.db.get_bool('limits.enforce', True):
+        """Continuously check limits during motion in momentary mode (uses cached values)."""
+        # Use cached enforcement setting - NO database queries
+        if not self.connected or not self._cached_limits['enforce']:
             self.limit_check_job = None
             return
 
         # Check if altitude axis is moving
         if self.axes_moving.get(2, False):
             if self.last_valid_alt_deg is not None:
-                alt_min = self.db.get_float('limits.alt_min', -5.0)
-                alt_max = self.db.get_float('limits.alt_max', 90.0)
+                # Use cached limit values - NO database queries
+                alt_min = self._cached_limits['alt_min']
+                alt_max = self._cached_limits['alt_max']
 
                 # Stop if limits exceeded
                 if self.last_valid_alt_deg >= alt_max or self.last_valid_alt_deg <= alt_min:
@@ -1924,8 +2085,8 @@ class TelescopeGUI:
         self.axes_moving[axis] = True
         self.protocol.slew_fixed_rate(str(axis), positive, speed)
 
-        # Start continuous limit checking in momentary mode
-        if self.db.get('controls.mode', 'latching') == 'momentary':
+        # Start continuous limit checking in momentary mode (use cached mode)
+        if self._cached_limits['mode'] == 'momentary':
             self.start_limit_checking()
     
     def stop_axis(self, axis):
@@ -2016,40 +2177,51 @@ class TelescopeGUI:
 
     def update_preset_tooltips(self, current_az_deg=None, current_alt_deg=None):
         """Update tooltips for preset buttons with target positions."""
-        if not self.connected or not self.protocol:
-            return
-
         try:
-            # Use provided position or query if not provided
-            if current_az_deg is None or current_alt_deg is None:
-                current_az = self.protocol.get_position('1')
-                current_alt = self.protocol.get_position('2')
+            # Get preset positions from cache
+            home_az = self._cached_presets['home_az']
+            home_alt = self._cached_presets['home_alt']
+            stow_az = self._cached_presets['stow_az']
+            stow_alt = self._cached_presets['stow_alt']
 
-                if current_az is not None and current_alt is not None:
-                    current_az_deg = self.protocol.counts_to_degrees(current_az, '1')
-                    current_alt_deg = self.protocol.counts_to_degrees(current_alt, '2')
+            # If connected, get current position and show deltas
+            if self.connected and self.protocol:
+                # Use provided position or query if not provided
+                if current_az_deg is None or current_alt_deg is None:
+                    current_az = self.protocol.get_position('1')
+                    current_alt = self.protocol.get_position('2')
 
-            if current_az_deg is not None and current_alt_deg is not None:
-                # Update Home tooltip (use cached values)
-                home_az = self._cached_presets['home_az']
-                home_alt = self._cached_presets['home_alt']
-                delta_az = home_az - current_az_deg
-                delta_alt = home_alt - current_alt_deg
+                    if current_az is not None and current_alt is not None:
+                        current_az_deg = self.protocol.counts_to_degrees(current_az, '1')
+                        current_alt_deg = self.protocol.counts_to_degrees(current_alt, '2')
+
+                if current_az_deg is not None and current_alt_deg is not None:
+                    # Update Home tooltip with delta
+                    delta_az = home_az - current_az_deg
+                    delta_alt = home_alt - current_alt_deg
+                    if self.home_tooltip:
+                        self.home_tooltip.update_text(
+                            f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°\n"
+                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        )
+
+                    # Update Stow tooltip with delta
+                    delta_az = stow_az - current_az_deg
+                    delta_alt = stow_alt - current_alt_deg
+                    if self.stow_tooltip:
+                        self.stow_tooltip.update_text(
+                            f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°\n"
+                            f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        )
+            else:
+                # When disconnected, show just the target positions
                 if self.home_tooltip:
                     self.home_tooltip.update_text(
-                        f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°\n"
-                        f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        f"Target: Az={home_az:.1f}°, Alt={home_alt:.1f}°"
                     )
-
-                # Update Stow tooltip (use cached values)
-                stow_az = self._cached_presets['stow_az']
-                stow_alt = self._cached_presets['stow_alt']
-                delta_az = stow_az - current_az_deg
-                delta_alt = stow_alt - current_alt_deg
                 if self.stow_tooltip:
                     self.stow_tooltip.update_text(
-                        f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°\n"
-                        f"Move: ΔAz={delta_az:+.1f}°, ΔAlt={delta_alt:+.1f}°"
+                        f"Target: Az={stow_az:.1f}°, Alt={stow_alt:.1f}°"
                     )
         except Exception as e:
             self.file_logger.log(f"Error updating tooltips: {e}", level='DEBUG')
@@ -2062,12 +2234,39 @@ class TelescopeGUI:
             'stow_az': self.db.get_float('positions.stow_az', 0),
             'stow_alt': self.db.get_float('positions.stow_alt', 90)
         }
+        self.file_logger.log(
+            f"Preset cache refreshed: HOME=Az{self._cached_presets['home_az']:.4f}°/Alt{self._cached_presets['home_alt']:.4f}°, "
+            f"STOW=Az{self._cached_presets['stow_az']:.4f}°/Alt{self._cached_presets['stow_alt']:.4f}°",
+            level='DEBUG'
+        )
+
+    def _refresh_limit_cache(self):
+        """Refresh cached limit values from database for performance during motion."""
+        self._cached_limits = {
+            'enforce': self.db.get_bool('limits.enforce', True),
+            'alt_min': self.db.get_float('limits.alt_min', -5.0),
+            'alt_max': self.db.get_float('limits.alt_max', 90.0),
+            'mode': self.db.get('controls.mode', 'latching')
+        }
+        self.file_logger.log(
+            f"Limit cache refreshed: enforce={self._cached_limits['enforce']}, "
+            f"range=[{self._cached_limits['alt_min']:.1f}°, {self._cached_limits['alt_max']:.1f}°], "
+            f"mode={self._cached_limits['mode']}",
+            level='DEBUG'
+        )
 
     def goto_home(self):
-        if not self.connected:
+        """Go to home position using cached values - NO database queries."""
+        if not self.connected or not self.protocol:
             return
-        home_az = self.protocol.degrees_to_counts(self.db.get_float('positions.home_az'), '1')
-        home_alt = self.protocol.degrees_to_counts(self.db.get_float('positions.home_alt'), '2')
+
+        # Use cached preset values instead of querying DB
+        home_az_deg = self._cached_presets['home_az']
+        home_alt_deg = self._cached_presets['home_alt']
+
+        home_az = self.protocol.degrees_to_counts(home_az_deg, '1')
+        home_alt = self.protocol.degrees_to_counts(home_alt_deg, '2')
+
         if home_az is not None and home_alt is not None:
             if self.protocol.goto_position('1', home_az):
                 if self.goto_tracker:
@@ -2097,14 +2296,22 @@ class TelescopeGUI:
                 self.db.set('positions.home_az', str(az_deg))
                 self.db.set('positions.home_alt', str(alt_deg))
                 self._refresh_preset_cache()  # Refresh cache after setting
+                self.file_logger.log(f"HOME saved to DB: Az={az_deg:.4f}°, Alt={alt_deg:.4f}°", level='DEBUG')
                 self.log(f"HOME set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
                 self.update_preset_tooltips()  # Update tooltips immediately
     
     def goto_stow(self):
-        if not self.connected:
+        """Go to stow position using cached values - NO database queries."""
+        if not self.connected or not self.protocol:
             return
-        stow_az = self.protocol.degrees_to_counts(self.db.get_float('positions.stow_az'), '1')
-        stow_alt = self.protocol.degrees_to_counts(self.db.get_float('positions.stow_alt'), '2')
+
+        # Use cached preset values instead of querying DB
+        stow_az_deg = self._cached_presets['stow_az']
+        stow_alt_deg = self._cached_presets['stow_alt']
+
+        stow_az = self.protocol.degrees_to_counts(stow_az_deg, '1')
+        stow_alt = self.protocol.degrees_to_counts(stow_alt_deg, '2')
+
         if stow_az is not None and stow_alt is not None:
             if self.protocol.goto_position('1', stow_az):
                 if self.goto_tracker:
@@ -2134,6 +2341,7 @@ class TelescopeGUI:
                 self.db.set('positions.stow_az', str(az_deg))
                 self.db.set('positions.stow_alt', str(alt_deg))
                 self._refresh_preset_cache()  # Refresh cache after setting
+                self.file_logger.log(f"STOW saved to DB: Az={az_deg:.4f}°, Alt={alt_deg:.4f}°", level='DEBUG')
                 self.log(f"STOW set: Az={az_deg:.2f}°, Alt={alt_deg:.2f}°")
                 self.update_preset_tooltips()  # Update tooltips immediately
     
@@ -2239,20 +2447,28 @@ class TelescopeGUI:
     
     def update_speed_label(self, *args):
         self.speed_label.configure(text=f"{self.speed_var.get():.2f}")
-        self.db.set('speed.default', str(self.speed_var.get()))
+
+        # Debounce database writes to avoid blocking UI on every slider movement
+        if self._speed_save_job:
+            self.root.after_cancel(self._speed_save_job)
+
+        self._speed_save_job = self.root.after(500, lambda: self.db.set('speed.default', str(self.speed_var.get())))
     
     def save_control_settings(self):
         self.db.set('controls.mode', self.control_mode_var.get())
         self.db.set('limits.enforce', str(self.enforce_limits_var.get()))
         self.db.set('limits.alt_min', str(self.alt_min_var.get()))
         self.db.set('limits.alt_max', str(self.alt_max_var.get()))
-        
+
         for key, entry in self.key_entries.items():
             self.db.set(f'controls.{key}', entry.get())
-        
+
+        # Refresh cached limit values after settings change
+        self._refresh_limit_cache()
+
         self.bind_keyboard_controls()
         self.setup_button_bindings()
-        
+
         messagebox.showinfo("Saved", "Control settings saved!")
         self.log("Control settings saved")
     

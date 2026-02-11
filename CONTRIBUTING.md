@@ -112,7 +112,7 @@ Look for issues tagged with:
 ### Project Structure
 
 ```
-skywatcher-controller/
+StarCommand/
 ├── StarCommandGUI.py       # GUI application
 ├── StarCommandCLI.py       # CLI application
 ├── docs/                   # Documentation
